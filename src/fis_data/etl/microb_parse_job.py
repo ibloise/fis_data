@@ -40,6 +40,11 @@ class MicrobParseJob:
 
         return self.repo.list_pending_file_ids(entity_name=entity_name)
 
+    def list_file_ids(self, *, entity_name: str) -> list[int]:
+        """Return all file IDs for the Microb entity."""
+
+        return self.repo.list_file_ids(entity_name=entity_name)
+
     def _parse_batches(
         self,
         *,
@@ -47,6 +52,7 @@ class MicrobParseJob:
         file_id: int,
         batch_size: int,
         parser: MicrobParser,
+        reprocess: bool,
     ) -> tuple[int, int, int]:
         total = ok = err = 0
         last_line_no = 0
@@ -57,6 +63,7 @@ class MicrobParseJob:
                 file_id=file_id,
                 limit=batch_size,
                 last_line_no=last_line_no,
+                only_pending=not reprocess,
             )
             if not batch:
                 break
@@ -84,7 +91,13 @@ class MicrobParseJob:
 
         return total, ok, err
 
-    def run(self, *, ctx: JobContext, batch_size: int = 2000) -> JobResult:
+    def run(
+        self,
+        *,
+        ctx: JobContext,
+        batch_size: int = 2000,
+        reprocess: bool = False,
+    ) -> JobResult:
         """Parse pending raw rows for one Microb file."""
 
         try:
@@ -94,6 +107,7 @@ class MicrobParseJob:
                 file_id=ctx.file_id,
                 batch_size=batch_size,
                 parser=parser,
+                reprocess=reprocess,
             )
             stats = ParseStats(
                 file_id=ctx.file_id,

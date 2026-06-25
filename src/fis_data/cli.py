@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import glob
 import json
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 from zipfile import is_zipfile
 
@@ -48,51 +50,88 @@ def _expand_input_paths(
 
     paths: list[Path] = []
     seen: set[Path] = set()
-    for raw_input in inputs:
-        pattern = str(Path(raw_input).expanduser())
-        matches = [Path(match) for match in sorted(glob.glob(pattern, recursive=True))]
-        if not matches:
-            path = Path(raw_input).expanduser()
-            if path.exists():
-                matches = [path]
-            else:
-                raise click.BadParameter(
-                    f"No files matched input: {raw_input}",
-                    param_hint="inputs",
-                )
-
-        expanded_matches: list[Path] = []
-        for path in matches:
-            if path.is_dir():
-                iterator = path.rglob("*") if recursive_dirs else path.iterdir()
-                directory_files = sorted(
-                    child for child in iterator if _is_accepted_file(
-                        child,
-                        allowed_extensions=allowed_extensions,
-                    )
-                )
-                if not directory_files:
-                    raise click.BadParameter(
-                        f"Input directory has no files: {path}",
-                        param_hint="inputs",
-                )
-                expanded_matches.extend(directory_files)
-                continue
-
-            expanded_matches.append(path)
-
-        for path in expanded_matches:
-            if not _is_accepted_file(path, allowed_extensions=allowed_extensions):
-                raise click.BadParameter(
-                    f"Input is not an accepted file: {path}",
-                    param_hint="inputs",
-                )
-            resolved = path.resolve()
-            if resolved not in seen:
-                seen.add(resolved)
-                paths.append(path)
+    for path in _iter_input_files(
+        inputs,
+        recursive_dirs=recursive_dirs,
+        allowed_extensions=allowed_extensions,
+    ):
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            paths.append(path)
 
     return paths
+
+
+def _iter_input_files(
+    inputs: tuple[str, ...],
+    *,
+    recursive_dirs: bool,
+    allowed_extensions: set[str] | None,
+) -> Iterator[Path]:
+    for raw_input in inputs:
+        for path in _iter_input_matches(raw_input):
+            yield from _iter_path_files(
+                path,
+                recursive_dirs=recursive_dirs,
+                allowed_extensions=allowed_extensions,
+            )
+
+
+def _iter_input_matches(raw_input: str) -> Iterator[Path]:
+    pattern = str(Path(raw_input).expanduser())
+    matches = [Path(match) for match in sorted(glob.glob(pattern, recursive=True))]
+    if matches:
+        yield from matches
+        return
+
+    path = Path(raw_input).expanduser()
+    if path.exists():
+        yield path
+        return
+
+    raise click.BadParameter(
+        f"No files matched input: {raw_input}",
+        param_hint="inputs",
+    )
+
+
+def _iter_path_files(
+    path: Path,
+    *,
+    recursive_dirs: bool,
+    allowed_extensions: set[str] | None,
+) -> Iterator[Path]:
+    if not path.is_dir():
+        _validate_input_file(path, allowed_extensions=allowed_extensions)
+        yield path
+        return
+
+    iterator = path.rglob("*") if recursive_dirs else path.iterdir()
+    directory_files = sorted(
+        child
+        for child in iterator
+        if _is_accepted_file(child, allowed_extensions=allowed_extensions)
+    )
+    if not directory_files:
+        raise click.BadParameter(
+            f"Input directory has no files: {path}",
+            param_hint="inputs",
+        )
+
+    yield from directory_files
+
+
+def _validate_input_file(
+    path: Path,
+    *,
+    allowed_extensions: set[str] | None,
+) -> None:
+    if not _is_accepted_file(path, allowed_extensions=allowed_extensions):
+        raise click.BadParameter(
+            f"Input is not an accepted file: {path}",
+            param_hint="inputs",
+        )
 
 
 def _is_accepted_file(
@@ -217,17 +256,35 @@ def ingest_text(
 ) -> None:
     """Ingest text files into the raw layer."""
 
-    results = [
-        _ingest_file(
-            db_path=db_path,
-            input_path=input_path,
-            source_name=source_name,
-            source_type="file",
-            entity_name=entity_name,
-            file_format="text",
-        )
-        for input_path in _expand_input_paths(inputs)
-    ]
+    input_paths = _expand_input_paths(inputs)
+    results = []
+    with click.progressbar(
+        input_paths,
+        label="Ingesting text files",
+        show_pos=True,
+        item_show_func=lambda path: str(path) if path is not None else "",
+        file=sys.stderr,
+    ) as progress:
+        for input_path in progress:
+            results.append(
+                _ingest_file(
+                    db_path=db_path,
+                    input_path=input_path,
+                    source_name=source_name,
+                    source_type="file",
+                    entity_name=entity_name,
+                    file_format="text",
+                )
+            )
+
+    inserted_lines = sum(int(result.get("inserted_lines", 0)) for result in results)
+    total_lines = sum(int(result.get("total_lines", 0)) for result in results)
+    click.echo(
+        "Text ingest complete: "
+        f"{len(results)} succeeded; "
+        f"{inserted_lines} inserted lines from {total_lines} lines seen.",
+        err=True,
+    )
     click.echo(json.dumps(results, ensure_ascii=False, indent=2))
 
 
@@ -255,47 +312,72 @@ def ingest_excel(
 ) -> None:
     """Ingest Excel workbooks into the raw layer."""
 
-    results = []
-    failed = False
-    for input_path in _expand_input_paths(
+    input_paths = _expand_input_paths(
         inputs,
         recursive_dirs=True,
         allowed_extensions={".xlsx", ".xlsm", ".xltx", ".xltm"},
-    ):
-        candidate_error = _excel_candidate_error(input_path)
-        if candidate_error is not None:
-            failed = failed or strict
-            results.append(
-                {
-                    "ok": False,
-                    "skipped": True,
-                    "path": str(input_path),
-                    "error": candidate_error,
-                }
-            )
-            continue
-
-        try:
-            results.append(
-                _ingest_file(
-                    db_path=db_path,
-                    input_path=input_path,
-                    source_name=source_name,
-                    source_type="file",
-                    entity_name=entity_name,
-                    file_format="excel",
+    )
+    results = []
+    failed = False
+    with click.progressbar(
+        input_paths,
+        label="Ingesting Excel workbooks",
+        show_pos=True,
+        item_show_func=lambda path: str(path) if path is not None else "",
+        file=sys.stderr,
+    ) as progress:
+        for input_path in progress:
+            candidate_error = _excel_candidate_error(input_path)
+            if candidate_error is not None:
+                failed = failed or strict
+                results.append(
+                    {
+                        "ok": False,
+                        "skipped": True,
+                        "path": str(input_path),
+                        "error": candidate_error,
+                    }
                 )
-            )
-        except Exception as exc:
-            failed = True
-            results.append(
-                {
-                    "ok": False,
-                    "path": str(input_path),
-                    "error": str(exc),
-                }
-            )
+                continue
 
+            try:
+                results.append(
+                    _ingest_file(
+                        db_path=db_path,
+                        input_path=input_path,
+                        source_name=source_name,
+                        source_type="file",
+                        entity_name=entity_name,
+                        file_format="excel",
+                    )
+                )
+            except Exception as exc:
+                failed = True
+                results.append(
+                    {
+                        "ok": False,
+                        "path": str(input_path),
+                        "error": str(exc),
+                    }
+                )
+
+    ok_count = sum(1 for result in results if result["ok"])
+    skipped_count = sum(1 for result in results if result.get("skipped"))
+    failed_count = sum(
+        1 for result in results if not result["ok"] and not result.get("skipped")
+    )
+    inserted_rows = sum(
+        int(result.get("inserted_rows", 0)) for result in results if result["ok"]
+    )
+    total_rows = sum(
+        int(result.get("total_rows", 0)) for result in results if result["ok"]
+    )
+    click.echo(
+        "Excel ingest complete: "
+        f"{ok_count} succeeded, {skipped_count} skipped, {failed_count} failed; "
+        f"{inserted_rows} inserted rows from {total_rows} non-empty rows seen.",
+        err=True,
+    )
     click.echo(json.dumps(results, ensure_ascii=False, indent=2))
     if failed:
         raise SystemExit(1)
@@ -321,11 +403,17 @@ def ingest_excel(
     help="File ID to parse. If omitted, parses all pending Microb files.",
 )
 @click.option("--batch-size", type=int, default=2000, show_default=True)
+@click.option(
+    "--reprocess-all",
+    is_flag=True,
+    help="Reparse all non-header rows, including rows already parsed.",
+)
 def parse_microb(
     db_path: str | None,
     entity_name: str,
     file_id: int | None,
     batch_size: int,
+    reprocess_all: bool,
 ) -> None:
     """Parse pending Microb raw text rows into payload_json."""
 
@@ -335,7 +423,11 @@ def parse_microb(
     file_ids = (
         [file_id]
         if file_id is not None
-        else job.list_pending_file_ids(entity_name=entity_name)
+        else (
+            job.list_file_ids(entity_name=entity_name)
+            if reprocess_all
+            else job.list_pending_file_ids(entity_name=entity_name)
+        )
     )
 
     if not file_ids:
@@ -344,20 +436,46 @@ def parse_microb(
 
     results = []
     failed = False
-    for pending_file_id in file_ids:
-        result = job.run(
-            ctx=JobContext(entity_name=entity_name, file_id=pending_file_id),
-            batch_size=batch_size,
-        )
-        results.append(
-            {
-                "file_id": pending_file_id,
-                "ok": result.ok,
-                "error": result.error,
-                **result.metrics,
-            }
-        )
-        failed = failed or not result.ok
+    with click.progressbar(
+        file_ids,
+        label="Parsing Microb files",
+        show_pos=True,
+        item_show_func=(
+            lambda pending_file_id: (
+                f"file_id={pending_file_id}"
+                if pending_file_id is not None
+                else ""
+            )
+        ),
+        file=sys.stderr,
+    ) as progress:
+        for pending_file_id in progress:
+            result = job.run(
+                ctx=JobContext(entity_name=entity_name, file_id=pending_file_id),
+                batch_size=batch_size,
+                reprocess=reprocess_all,
+            )
+            results.append(
+                {
+                    "file_id": pending_file_id,
+                    "ok": result.ok,
+                    "error": result.error,
+                    **result.metrics,
+                }
+            )
+            failed = failed or not result.ok
+
+    ok_count = sum(1 for result in results if result["ok"])
+    failed_count = len(results) - ok_count
+    parsed_total = sum(int(result.get("parsed_total", 0)) for result in results)
+    parsed_ok = sum(int(result.get("parsed_ok", 0)) for result in results)
+    parsed_error = sum(int(result.get("parsed_error", 0)) for result in results)
+    click.echo(
+        "Microb parse complete: "
+        f"{ok_count} succeeded, {failed_count} failed; "
+        f"{parsed_ok}/{parsed_total} rows parsed, {parsed_error} parse errors.",
+        err=True,
+    )
 
     click.echo(json.dumps(results, ensure_ascii=False, indent=2))
     if failed:

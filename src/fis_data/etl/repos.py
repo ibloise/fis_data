@@ -54,6 +54,23 @@ class RawTextLinesRepository:
 
         return [int(row[0]) for row in rows]
 
+    def list_file_ids(self, *, entity_name: str) -> list[int]:
+        """Return all file IDs with non-header raw text rows for an entity."""
+
+        query = text(
+            """
+            SELECT DISTINCT file_id
+            FROM raw_text_lines
+            WHERE entity_name = :entity_name
+              AND is_header = 0
+            ORDER BY file_id ASC
+            """
+        )
+        with self.engine.begin() as conn:
+            rows = conn.execute(query, {"entity_name": entity_name}).fetchall()
+
+        return [int(row[0]) for row in rows]
+
     def count_parse_candidates(self, *, entity_name: str, file_id: int) -> int:
         """Count pending non-header rows for a file."""
 
@@ -82,17 +99,19 @@ class RawTextLinesRepository:
         file_id: int,
         limit: int,
         last_line_no: int,
+        only_pending: bool = True,
     ) -> list[RawTextLineRow]:
         """Fetch a keyset-paginated batch of pending non-header rows."""
 
+        status_filter = "AND parse_status = 'RAW_ONLY'" if only_pending else ""
         query = text(
-            """
+            f"""
             SELECT line_id, line_no, raw_line
             FROM raw_text_lines
             WHERE entity_name = :entity_name
               AND file_id = :file_id
               AND is_header = 0
-              AND parse_status = 'RAW_ONLY'
+              {status_filter}
               AND line_no > :last_line_no
             ORDER BY line_no ASC
             LIMIT :limit
