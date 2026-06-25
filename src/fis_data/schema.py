@@ -134,6 +134,65 @@ raw_excel_rows = Table(
     ),
 )
 
+ctl_excel_parse_file = Table(
+    "ctl_excel_parse_file",
+    metadata,
+    Column("excel_file_parse_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", Integer, ForeignKey("ctl_etl_run.run_id"), nullable=False),
+    Column("file_id", Integer, ForeignKey("ctl_file_registry.file_id"), nullable=False),
+    Column("entity_name", String(100), nullable=False),
+    Column("file_kind", String(100), nullable=True),
+    Column("parser_name", String(100), nullable=False),
+    Column("parser_version", String(40), nullable=False),
+    Column("status", String(40), nullable=False),
+    Column("sheets_seen", Integer, nullable=False, server_default=text("0")),
+    Column("sheets_parsed", Integer, nullable=False, server_default=text("0")),
+    Column("rows_seen", Integer, nullable=False, server_default=text("0")),
+    Column("rows_parsed", Integer, nullable=False, server_default=text("0")),
+    Column("rows_error", Integer, nullable=False, server_default=text("0")),
+    Column("error", Text, nullable=True),
+    Column("details_json", Text, nullable=True),
+    Column(
+        "started_at",
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+    Column("finished_at", DateTime, nullable=True),
+)
+
+ctl_excel_parse_sheet = Table(
+    "ctl_excel_parse_sheet",
+    metadata,
+    Column("excel_sheet_parse_id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "excel_file_parse_id",
+        Integer,
+        ForeignKey("ctl_excel_parse_file.excel_file_parse_id"),
+        nullable=False,
+    ),
+    Column("run_id", Integer, ForeignKey("ctl_etl_run.run_id"), nullable=False),
+    Column("file_id", Integer, ForeignKey("ctl_file_registry.file_id"), nullable=False),
+    Column("entity_name", String(100), nullable=False),
+    Column("sheet_name", String(255), nullable=False),
+    Column("sheet_kind", String(100), nullable=True),
+    Column("header_row_no", Integer, nullable=True),
+    Column("status", String(40), nullable=False),
+    Column("rows_seen", Integer, nullable=False, server_default=text("0")),
+    Column("rows_parsed", Integer, nullable=False, server_default=text("0")),
+    Column("rows_skipped", Integer, nullable=False, server_default=text("0")),
+    Column("rows_error", Integer, nullable=False, server_default=text("0")),
+    Column("error", Text, nullable=True),
+    Column("details_json", Text, nullable=True),
+    Column(
+        "started_at",
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+    Column("finished_at", DateTime, nullable=True),
+)
+
 Index("idx_file_registry_source", ctl_file_registry.c.source_name)
 Index(
     "idx_ctl_etl_run_pipeline_started",
@@ -158,6 +217,16 @@ Index(
     raw_excel_rows.c.file_id,
     raw_excel_rows.c.sheet_name,
     raw_excel_rows.c.row_no,
+)
+Index(
+    "idx_excel_parse_file_file_run",
+    ctl_excel_parse_file.c.file_id,
+    ctl_excel_parse_file.c.run_id,
+)
+Index(
+    "idx_excel_parse_sheet_file_sheet",
+    ctl_excel_parse_sheet.c.file_id,
+    ctl_excel_parse_sheet.c.sheet_name,
 )
 
 

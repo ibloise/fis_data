@@ -16,6 +16,7 @@ from sqlalchemy.engine import Engine
 from .db import DBSettings, get_engine, sqlite_url_for_path
 from .etl.contracts import JobContext
 from .etl.control import RunStatus, ensure_source, finish_run, start_run
+from .etl.excel_parse_job import ExcelParseJob
 from .etl.file_registry import register_file
 from .etl.ingest_excel import ingest_excel_file
 from .etl.ingest_text import ingest_text_file
@@ -377,6 +378,128 @@ def ingest_excel(
         f"{ok_count} succeeded, {skipped_count} skipped, {failed_count} failed; "
         f"{inserted_rows} inserted rows from {total_rows} non-empty rows seen.",
         err=True,
+    )
+    click.echo(json.dumps(results, ensure_ascii=False, indent=2))
+    if failed:
+        raise SystemExit(1)
+
+
+@cli.command("parse-excel")
+@click.option(
+    "--db-path",
+    type=click.Path(dir_okay=False),
+    help="SQLite database path.",
+)
+@click.option("--entity", "entity_name", required=True, help="Excel entity name.")
+@click.option(
+    "--file-id",
+    type=int,
+    required=False,
+    help="File ID to parse. If omitted, parses all candidate Excel files.",
+)
+@click.option(
+    "--sheet-name",
+    required=False,
+    help="Sheet name to parse. If omitted, parses all candidate sheets.",
+)
+@click.option("--batch-size", type=int, default=1000, show_default=True)
+@click.option(
+    "--reprocess-all",
+    is_flag=True,
+    help="Reparse all Excel rows, including rows already parsed or skipped.",
+)
+def parse_excel(
+    db_path: str | None,
+    entity_name: str,
+    file_id: int | None,
+    sheet_name: str | None,
+    batch_size: int,
+    reprocess_all: bool,
+) -> None:
+    """Parse raw Excel rows into payload_json."""
+
+    engine = _engine_for_db_path(db_path)
+    create_schema(engine)
+    run_id = start_run(engine, pipeline_name=f"parse:excel:{entity_name}")
+    job = ExcelParseJob(engine)
+    file_ids = job.list_candidate_file_ids(
+        entity_name=entity_name,
+        file_id=file_id,
+        sheet_name=sheet_name,
+        reprocess=reprocess_all,
+    )
+
+    if not file_ids:
+        finish_run(
+            engine,
+            run_id=run_id,
+            status=RunStatus.SUCCESS,
+            details_json=json.dumps({"entity_name": entity_name, "files": 0}),
+        )
+        click.echo("[]")
+        return
+
+    results = []
+    failed = False
+    with click.progressbar(
+        file_ids,
+        label="Parsing Excel files",
+        show_pos=True,
+        item_show_func=(
+            lambda pending_file_id: (
+                f"file_id={pending_file_id}"
+                if pending_file_id is not None
+                else ""
+            )
+        ),
+        file=sys.stderr,
+    ) as progress:
+        for pending_file_id in progress:
+            result = job.run(
+                ctx=JobContext(entity_name=entity_name, file_id=pending_file_id),
+                run_id=run_id,
+                sheet_name=sheet_name,
+                batch_size=batch_size,
+                reprocess=reprocess_all,
+            )
+            results.append(
+                {
+                    "file_id": pending_file_id,
+                    "ok": result.ok,
+                    "error": result.error,
+                    **result.metrics,
+                }
+            )
+            failed = failed or not result.ok
+
+    ok_count = sum(1 for result in results if result["ok"])
+    failed_count = len(results) - ok_count
+    rows_seen = sum(int(result.get("rows_seen", 0)) for result in results)
+    rows_parsed = sum(int(result.get("rows_parsed", 0)) for result in results)
+    rows_error = sum(int(result.get("rows_error", 0)) for result in results)
+    click.echo(
+        "Excel parse complete: "
+        f"{ok_count} succeeded, {failed_count} failed; "
+        f"{rows_parsed}/{rows_seen} rows parsed, {rows_error} row errors.",
+        err=True,
+    )
+
+    finish_run(
+        engine,
+        run_id=run_id,
+        status=RunStatus.FAILED if failed else RunStatus.SUCCESS,
+        details_json=json.dumps(
+            {
+                "entity_name": entity_name,
+                "files": len(results),
+                "ok": ok_count,
+                "failed": failed_count,
+                "rows_seen": rows_seen,
+                "rows_parsed": rows_parsed,
+                "rows_error": rows_error,
+            },
+            ensure_ascii=False,
+        ),
     )
     click.echo(json.dumps(results, ensure_ascii=False, indent=2))
     if failed:
