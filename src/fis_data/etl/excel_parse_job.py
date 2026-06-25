@@ -8,7 +8,13 @@ from dataclasses import asdict
 from sqlalchemy.engine import Engine
 
 from .contracts import JobContext, JobResult
-from .excel_profiles import EXCEL_ENTITY_PARSERS, ExcelEntityParser, SheetProfile
+from .excel_profiles import (
+    ExcelEntityParser,
+    FileProfile,
+    SheetProfile,
+    normalize_profile_token,
+)
+from .excel_registry import get_excel_entity_parser
 from .repos import RawExcelRowsRepository
 from .types import (
     ExcelParseStats,
@@ -80,7 +86,7 @@ class ExcelParseJob:
         reprocess: bool,
     ) -> ExcelParseStats:
         metadata = self.repo.get_file_metadata(file_id=ctx.file_id)
-        parser = EXCEL_ENTITY_PARSERS.get(ctx.entity_name)
+        parser = get_excel_entity_parser(ctx.entity_name)
 
         if parser is None:
             return self._mark_unsupported_entity(
@@ -137,12 +143,26 @@ class ExcelParseJob:
                 )
                 continue
 
+            if profile.row_parser is None:
+                sheet_stats.append(
+                    self._mark_sheet_profile_stub(
+                        ctx=ctx,
+                        run_id=run_id,
+                        excel_file_parse_id=file_audit_id,
+                        sheet_name=candidate_sheet,
+                        profile=profile,
+                        reprocess=reprocess,
+                    )
+                )
+                continue
+
             sheet_stats.append(
-                self._mark_sheet_profile_stub(
+                self._parse_sheet_profile(
                     ctx=ctx,
                     run_id=run_id,
                     excel_file_parse_id=file_audit_id,
                     sheet_name=candidate_sheet,
+                    file_profile=file_profile,
                     profile=profile,
                     reprocess=reprocess,
                 )
@@ -347,6 +367,128 @@ class ExcelParseJob:
         )
         return stat
 
+    def _parse_sheet_profile(
+        self,
+        *,
+        ctx: JobContext,
+        run_id: int,
+        excel_file_parse_id: int,
+        sheet_name: str,
+        file_profile: FileProfile,
+        profile: SheetProfile,
+        reprocess: bool,
+    ) -> ExcelSheetParseStats:
+        rows = self.repo.fetch_sheet_rows(
+            entity_name=ctx.entity_name,
+            file_id=ctx.file_id,
+            sheet_name=sheet_name,
+            only_pending=not reprocess,
+        )
+        header_row = _detect_header_row(rows, profile)
+        if header_row is None:
+            return self._mark_sheet_skipped(
+                ctx=ctx,
+                run_id=run_id,
+                excel_file_parse_id=excel_file_parse_id,
+                sheet_name=sheet_name,
+                sheet_kind=profile.kind,
+                status=ExcelParseStatus.SCHEMA_MISMATCH,
+                reprocess=reprocess,
+                error="No matching header row found.",
+            )
+
+        header_index = _build_header_index(header_row, profile)
+        missing_headers = [
+            header
+            for header in profile.required_headers
+            if normalize_profile_token(header) not in header_index
+        ]
+        if missing_headers:
+            return self._mark_sheet_skipped(
+                ctx=ctx,
+                run_id=run_id,
+                excel_file_parse_id=excel_file_parse_id,
+                sheet_name=sheet_name,
+                sheet_kind=profile.kind,
+                status=ExcelParseStatus.SCHEMA_MISMATCH,
+                reprocess=reprocess,
+                error=f"Missing required headers: {', '.join(missing_headers)}.",
+            )
+
+        updates: list[ParsedExcelRowUpdate] = []
+        rows_seen = rows_parsed = rows_skipped = rows_error = 0
+        context = {
+            "entity": ctx.entity_name,
+            "file_id": ctx.file_id,
+            "file_kind": file_profile.kind,
+            "sheet_kind": profile.kind,
+            "header_row_no": header_row.row_no,
+        }
+        for row in rows:
+            rows_seen += 1
+            if (
+                not profile.headerless_columns
+                and row.row_no <= header_row.row_no
+            ) or _is_empty_excel_row(row):
+                rows_skipped += 1
+                updates.append(
+                    ParsedExcelRowUpdate(
+                        row_id=row.row_id,
+                        payload_json=None,
+                        status=ExcelParseStatus.SKIPPED_METADATA,
+                        error=None,
+                    )
+                )
+                continue
+
+            assert profile.row_parser is not None
+            update = profile.row_parser(row, header_index, context)
+            updates.append(update)
+            if update.status == ExcelParseStatus.PARSED_OK:
+                rows_parsed += 1
+            elif update.status == ExcelParseStatus.PARSE_ERROR:
+                rows_error += 1
+            else:
+                rows_skipped += 1
+
+        self.repo.apply_excel_updates(updates)
+        status = (
+            ExcelParseStatus.PARSE_ERROR
+            if rows_error
+            else ExcelParseStatus.PARSED_OK
+        )
+        stat = ExcelSheetParseStats(
+            sheet_name=sheet_name,
+            sheet_kind=profile.kind,
+            header_row_no=header_row.row_no,
+            status=status,
+            rows_seen=rows_seen,
+            rows_parsed=rows_parsed,
+            rows_skipped=rows_skipped,
+            rows_error=rows_error,
+            error=None,
+        )
+        self.repo.insert_sheet_audit(
+            excel_file_parse_id=excel_file_parse_id,
+            run_id=run_id,
+            file_id=ctx.file_id,
+            entity_name=ctx.entity_name,
+            sheet_name=sheet_name,
+            sheet_kind=profile.kind,
+            header_row_no=header_row.row_no,
+            status=status,
+            rows_seen=rows_seen,
+            rows_parsed=rows_parsed,
+            rows_skipped=rows_skipped,
+            rows_error=rows_error,
+            details={
+                "matched_profile": profile.kind,
+                "required_headers": list(profile.required_headers),
+                "header_index": header_index,
+            },
+        )
+        return stat
+
     def _mark_sheet_skipped(
         self,
         *,
@@ -411,6 +553,54 @@ def _detect_header_row_no(
         if any(value is not None and str(value).strip() for value in row.values):
             return row.row_no
     return None
+
+
+def _detect_header_row(
+    rows: list[RawExcelRow],
+    profile: SheetProfile,
+) -> RawExcelRow | None:
+    if profile.headerless_columns and rows:
+        return RawExcelRow(
+            row_id=0,
+            sheet_name=rows[0].sheet_name,
+            row_no=0,
+            values=list(profile.headerless_columns),
+        )
+    required = {normalize_profile_token(header) for header in profile.required_headers}
+    for row in rows[: profile.header_scan_rows]:
+        header_index = _build_header_index(row, profile)
+        if required.issubset(header_index):
+            return row
+    return None
+
+
+def _build_header_index(
+    row: RawExcelRow,
+    profile: SheetProfile,
+) -> dict[str, int]:
+    aliases = _canonical_alias_map(profile)
+    header_index: dict[str, int] = {}
+    for index, value in enumerate(row.values):
+        if value is None:
+            continue
+        normalized = normalize_profile_token(str(value))
+        canonical = aliases.get(normalized, normalized)
+        header_index.setdefault(canonical, index)
+    return header_index
+
+
+def _canonical_alias_map(profile: SheetProfile) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for canonical, values in profile.column_aliases.items():
+        normalized_canonical = normalize_profile_token(canonical)
+        aliases[normalized_canonical] = normalized_canonical
+        for value in values:
+            aliases[normalize_profile_token(value)] = normalized_canonical
+    return aliases
+
+
+def _is_empty_excel_row(row: RawExcelRow) -> bool:
+    return all(value is None or str(value).strip() == "" for value in row.values)
 
 
 def _file_stats(

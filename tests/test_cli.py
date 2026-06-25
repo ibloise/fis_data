@@ -281,7 +281,22 @@ def test_cli_parse_excel_pcr_classifies_file_kind_from_filename(tmp_path) -> Non
     source_path = tmp_path / "PCR_RUN - Quantification Cq Results.xlsx"
     _write_workbook(
         source_path,
-        sheets={"Results": [["Well", "Sample", "Cq"], ["A01", "S1", 23.4]]},
+        sheets={
+            "0": [
+                [
+                    "Well",
+                    "Fluor",
+                    "Target",
+                    "Content",
+                    "Sample",
+                    "Cq",
+                    "Cq Mean",
+                    "Cq Std. Dev.",
+                ],
+                ["A01", "FAM", "N1", "Unkn", "S1", 23.4, 23.4, 0.1],
+            ],
+            "Run Information": [["Run Name", "PCR_RUN"]],
+        },
     )
 
     ingest_result = CliRunner().invoke(
@@ -321,6 +336,612 @@ def test_cli_parse_excel_pcr_classifies_file_kind_from_filename(tmp_path) -> Non
         ).scalar_one()
 
     assert file_kind == "quantification_cq_results"
+
+
+def test_cli_parse_excel_pcr_entity_matching_is_case_insensitive(tmp_path) -> None:
+    db_path = tmp_path / "fis.sqlite"
+    source_path = tmp_path / "PCR_RUN - Quantification Cq Results.xlsx"
+    _write_workbook(
+        source_path,
+        sheets={
+            "0": [
+                [
+                    "Well",
+                    "Fluor",
+                    "Target",
+                    "Content",
+                    "Sample",
+                    "Cq",
+                    "Cq Mean",
+                    "Cq Std. Dev.",
+                ],
+                ["A01", "FAM", "N1", "Unkn", "S1", 23.4, 23.4, 0.1],
+            ],
+        },
+    )
+
+    ingest_result = CliRunner().invoke(
+        cli,
+        [
+            "ingest-excel",
+            "--db-path",
+            str(db_path),
+            "--source-name",
+            "PCR",
+            "--entity",
+            "PCR",
+            str(source_path),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "parse-excel",
+            "--db-path",
+            str(db_path),
+            "--entity",
+            "PCR",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["entity_name"] == "PCR"
+    assert payload[0]["file_kind"] == "quantification_cq_results"
+    assert payload[0]["parser_name"] == "pcr-excel"
+    assert payload[0]["status"] == "PARSED_OK"
+
+
+def test_cli_parse_excel_pcr_parses_quantification_cq_results(tmp_path) -> None:
+    db_path = tmp_path / "fis.sqlite"
+    source_path = tmp_path / "PCR_RUN - Quantification Cq Results.xlsx"
+    _write_workbook(
+        source_path,
+        sheets={
+            "0": [
+                ["Instrument", "redacted"],
+                [
+                    "Well",
+                    "Fluor",
+                    "Target",
+                    "Content",
+                    "Sample",
+                    "Cq",
+                    "Cq Mean",
+                    "Cq Std. Dev.",
+                ],
+                ["A01", "FAM", "N1", "Unkn", "S1", 23.4, 23.5, 0.1],
+                ["A02", "FAM", "N2", "Unkn", "S2", "not-a-number", 0, 0],
+                [None, None, None, None],
+            ],
+            "Run Information": [["Run Name", "PCR_RUN"], ["Instrument", "QS7"]],
+        },
+    )
+
+    ingest_result = CliRunner().invoke(
+        cli,
+        [
+            "ingest-excel",
+            "--db-path",
+            str(db_path),
+            "--source-name",
+            "pcr",
+            "--entity",
+            "pcr",
+            str(source_path),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "parse-excel",
+            "--db-path",
+            str(db_path),
+            "--entity",
+            "pcr",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["file_kind"] == "quantification_cq_results"
+    assert payload[0]["status"] == "PARSE_ERROR"
+    assert payload[0]["rows_seen"] == 6
+    assert payload[0]["rows_parsed"] == 3
+    assert payload[0]["rows_error"] == 1
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT row_no, parse_status, payload_json, parse_error
+                FROM raw_excel_rows
+                WHERE sheet_name = '0'
+                ORDER BY row_no ASC
+                """
+            )
+        ).all()
+        sheet_audit = conn.execute(
+            text(
+                """
+                SELECT sheet_kind, header_row_no, status, rows_parsed, rows_error
+                FROM ctl_excel_parse_sheet
+                WHERE sheet_name = '0'
+                """
+            )
+        ).one()
+        run_info_payloads = conn.execute(
+            text(
+                """
+                SELECT payload_json
+                FROM raw_excel_rows
+                WHERE sheet_name = 'Run Information'
+                ORDER BY row_no ASC
+                """
+            )
+        ).scalars().all()
+
+    assert rows[0][1] == "SKIPPED_METADATA"
+    assert rows[1][1] == "SKIPPED_METADATA"
+    assert rows[2][1] == "PARSED_OK"
+    assert rows[3][1] == "PARSE_ERROR"
+    parsed_payload = json.loads(rows[2][2])
+    assert parsed_payload == {
+        "entity": "pcr",
+        "file_kind": "quantification_cq_results",
+        "sheet_kind": "cq_results",
+        "fields": {
+            "well": "A01",
+            "fluor": "FAM",
+            "target": "N1",
+            "content": "Unkn",
+            "sample": "S1",
+            "cq": 23.4,
+            "cq_mean": 23.5,
+            "cq_std_dev": 0.1,
+        },
+        "source": {
+            "file_id": 1,
+            "sheet_name": "0",
+            "row_no": 3,
+            "header_row_no": 2,
+        },
+    }
+    assert "Invalid numeric value for cq" in rows[3][3]
+    assert sheet_audit == ("cq_results", 2, "PARSE_ERROR", 1, 1)
+    assert json.loads(run_info_payloads[0])["fields"] == {
+        "key": "Run Name",
+        "value": "PCR_RUN",
+    }
+
+
+def test_cli_parse_excel_pcr_parses_quantification_amplification_results(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "fis.sqlite"
+    source_path = tmp_path / "PCR_RUN - Quantification Amplification Results.xlsx"
+    _write_workbook(
+        source_path,
+        sheets={
+            "SYBR": [
+                [None, "Cycle", "A1", "A2"],
+                [None, 1, 10.5, 20],
+                [None, 2, None, 30.25],
+                [None, 3, "bad-rfu", 40],
+            ],
+            "Run Information": [["Run Name", "PCR_RUN"], ["Instrument", "QS7"]],
+        },
+    )
+
+    ingest_result = CliRunner().invoke(
+        cli,
+        [
+            "ingest-excel",
+            "--db-path",
+            str(db_path),
+            "--source-name",
+            "PCR",
+            "--entity",
+            "PCR",
+            str(source_path),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "parse-excel",
+            "--db-path",
+            str(db_path),
+            "--entity",
+            "PCR",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["file_kind"] == "quantification_amplification_results"
+    assert payload[0]["status"] == "PARSE_ERROR"
+    assert payload[0]["rows_seen"] == 6
+    assert payload[0]["rows_parsed"] == 4
+    assert payload[0]["rows_error"] == 1
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT row_no, parse_status, payload_json, parse_error
+                FROM raw_excel_rows
+                WHERE sheet_name = 'SYBR'
+                ORDER BY row_no ASC
+                """
+            )
+        ).all()
+        sheet_audit = conn.execute(
+            text(
+                """
+                SELECT sheet_kind, header_row_no, status, rows_parsed, rows_error
+                FROM ctl_excel_parse_sheet
+                WHERE sheet_name = 'SYBR'
+                """
+            )
+        ).one()
+
+    assert rows[0][1] == "SKIPPED_METADATA"
+    assert rows[1][1] == "PARSED_OK"
+    assert rows[2][1] == "PARSED_OK"
+    assert rows[3][1] == "PARSE_ERROR"
+    first_payload = json.loads(rows[1][2])
+    assert first_payload == {
+        "entity": "pcr",
+        "file_kind": "quantification_amplification_results",
+        "sheet_kind": "amplification_sybr",
+        "fields": {
+            "cycle": 1,
+            "rfu_by_well": {
+                "A1": 10.5,
+                "A2": 20.0,
+            },
+        },
+        "source": {
+            "file_id": 1,
+            "sheet_name": "SYBR",
+            "row_no": 2,
+            "header_row_no": 1,
+        },
+    }
+    second_payload = json.loads(rows[2][2])
+    assert second_payload["fields"]["rfu_by_well"] == {"A1": None, "A2": 30.25}
+    assert "Invalid RFU value for well A1" in rows[3][3]
+    assert sheet_audit == ("amplification_sybr", 1, "PARSE_ERROR", 2, 1)
+
+
+def test_cli_parse_excel_pcr_parses_melt_curve_rfu_results(tmp_path) -> None:
+    db_path = tmp_path / "fis.sqlite"
+    source_path = tmp_path / "PCR_RUN - Melt Curve RFU Results.xlsx"
+    _write_workbook(
+        source_path,
+        sheets={
+            "SYBR": [
+                [None, "Temperature", "A1", "A2"],
+                [None, 65.0, 100, 200],
+                [None, 65.5, "", 210.25],
+                [None, "bad-temp", 120, 220],
+            ],
+            "Run Information": [["Run Name", "PCR_RUN"], ["Instrument", "QS7"]],
+        },
+    )
+
+    ingest_result = CliRunner().invoke(
+        cli,
+        [
+            "ingest-excel",
+            "--db-path",
+            str(db_path),
+            "--source-name",
+            "PCR",
+            "--entity",
+            "PCR",
+            str(source_path),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "parse-excel",
+            "--db-path",
+            str(db_path),
+            "--entity",
+            "PCR",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["file_kind"] == "melt_curve_rfu_results"
+    assert payload[0]["status"] == "PARSE_ERROR"
+    assert payload[0]["rows_seen"] == 6
+    assert payload[0]["rows_parsed"] == 4
+    assert payload[0]["rows_error"] == 1
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT row_no, parse_status, payload_json, parse_error
+                FROM raw_excel_rows
+                WHERE sheet_name = 'SYBR'
+                ORDER BY row_no ASC
+                """
+            )
+        ).all()
+        sheet_audit = conn.execute(
+            text(
+                """
+                SELECT sheet_kind, header_row_no, status, rows_parsed, rows_error
+                FROM ctl_excel_parse_sheet
+                WHERE sheet_name = 'SYBR'
+                """
+            )
+        ).one()
+
+    assert rows[0][1] == "SKIPPED_METADATA"
+    assert rows[1][1] == "PARSED_OK"
+    assert rows[2][1] == "PARSED_OK"
+    assert rows[3][1] == "PARSE_ERROR"
+    first_payload = json.loads(rows[1][2])
+    assert first_payload == {
+        "entity": "pcr",
+        "file_kind": "melt_curve_rfu_results",
+        "sheet_kind": "melt_curve_sybr",
+        "fields": {
+            "temperature": 65.0,
+            "rfu_by_well": {
+                "A1": 100.0,
+                "A2": 200.0,
+            },
+        },
+        "source": {
+            "file_id": 1,
+            "sheet_name": "SYBR",
+            "row_no": 2,
+            "header_row_no": 1,
+        },
+    }
+    second_payload = json.loads(rows[2][2])
+    assert second_payload["fields"]["rfu_by_well"] == {"A1": None, "A2": 210.25}
+    assert "Invalid numeric value for temperature" in rows[3][3]
+    assert sheet_audit == ("melt_curve_sybr", 1, "PARSE_ERROR", 2, 1)
+
+
+def test_cli_parse_excel_pcr_parses_melt_curve_derivative_results(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "fis.sqlite"
+    source_path = tmp_path / "PCR_RUN - Melt Curve Derivative Results.xlsx"
+    _write_workbook(
+        source_path,
+        sheets={
+            "SYBR": [
+                [None, "Temperature", "A1", "A2"],
+                [None, 65.0, 100, 200],
+            ],
+            "Run Information": [["Run Name", "PCR_RUN"]],
+        },
+    )
+
+    ingest_result = CliRunner().invoke(
+        cli,
+        [
+            "ingest-excel",
+            "--db-path",
+            str(db_path),
+            "--source-name",
+            "PCR",
+            "--entity",
+            "PCR",
+            str(source_path),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "parse-excel",
+            "--db-path",
+            str(db_path),
+            "--entity",
+            "PCR",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["file_kind"] == "melt_curve_derivative_results"
+    assert payload[0]["status"] == "PARSED_OK"
+    assert payload[0]["rows_seen"] == 3
+    assert payload[0]["rows_parsed"] == 2
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        parsed_payload = conn.execute(
+            text(
+                """
+                SELECT payload_json
+                FROM raw_excel_rows
+                WHERE sheet_name = 'SYBR' AND parse_status = 'PARSED_OK'
+                """
+            )
+        ).scalar_one()
+        sheet_audit = conn.execute(
+            text(
+                """
+                SELECT sheet_kind, header_row_no, status, rows_parsed, rows_error
+                FROM ctl_excel_parse_sheet
+                WHERE sheet_name = 'SYBR'
+                """
+            )
+        ).one()
+
+    assert json.loads(parsed_payload) == {
+        "entity": "pcr",
+        "file_kind": "melt_curve_derivative_results",
+        "sheet_kind": "melt_curve_derivative_sybr",
+        "fields": {
+            "temperature": 65.0,
+            "rfu_by_well": {
+                "A1": 100.0,
+                "A2": 200.0,
+            },
+        },
+        "source": {
+            "file_id": 1,
+            "sheet_name": "SYBR",
+            "row_no": 2,
+            "header_row_no": 1,
+        },
+    }
+    assert sheet_audit == ("melt_curve_derivative_sybr", 1, "PARSED_OK", 1, 0)
+
+
+def test_cli_parse_excel_pcr_missing_required_header_is_schema_mismatch(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "fis.sqlite"
+    source_path = tmp_path / "PCR_RUN - Quantification Cq Results.xlsx"
+    _write_workbook(
+        source_path,
+        sheets={"0": [["Well", "Sample Name", "Cq"], ["A01", "S1", 23.4]]},
+    )
+
+    ingest_result = CliRunner().invoke(
+        cli,
+        [
+            "ingest-excel",
+            "--db-path",
+            str(db_path),
+            "--source-name",
+            "pcr",
+            "--entity",
+            "pcr",
+            str(source_path),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "parse-excel",
+            "--db-path",
+            str(db_path),
+            "--entity",
+            "pcr",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["status"] == "SCHEMA_MISMATCH"
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        statuses = conn.execute(
+            text("SELECT DISTINCT parse_status FROM raw_excel_rows")
+        ).scalars().all()
+        error = conn.execute(
+            text("SELECT error FROM ctl_excel_parse_sheet")
+        ).scalar_one()
+
+    assert statuses == ["SCHEMA_MISMATCH"]
+    assert error == "No matching header row found."
+
+
+def test_cli_parse_excel_pcr_unknown_file_and_sheet_are_explicit_skips(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "fis.sqlite"
+    unknown_file = tmp_path / "PCR_RUN - Unknown Export.xlsx"
+    unknown_sheet_file = tmp_path / "PCR_RUN - Quantification Cq Results.xlsx"
+    _write_workbook(
+        unknown_file,
+        sheets={
+            "Results": [
+                ["Well", "Sample Name", "Target Name", "Cq"],
+                ["A01", "S1", "N1", 1],
+            ]
+        },
+    )
+    _write_workbook(
+        unknown_sheet_file,
+        sheets={
+            "Notes": [
+                ["Well", "Sample Name", "Target Name", "Cq"],
+                ["A01", "S1", "N1", 1],
+            ]
+        },
+    )
+
+    ingest_result = CliRunner().invoke(
+        cli,
+        [
+            "ingest-excel",
+            "--db-path",
+            str(db_path),
+            "--source-name",
+            "pcr",
+            "--entity",
+            "pcr",
+            str(tmp_path),
+        ],
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "parse-excel",
+            "--db-path",
+            str(db_path),
+            "--entity",
+            "pcr",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = sorted(
+        json.loads(result.stdout),
+        key=lambda item: item["file_kind"] or "",
+    )
+    assert [item["status"] for item in payload] == [
+        "SKIPPED_FILE_PROFILE",
+        "SKIPPED_SHEET_PROFILE",
+    ]
+
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        statuses = conn.execute(
+            text(
+                """
+                SELECT DISTINCT parse_status
+                FROM raw_excel_rows
+                ORDER BY parse_status ASC
+                """
+            )
+        ).scalars().all()
+
+    assert statuses == ["SKIPPED_FILE_PROFILE", "SKIPPED_SHEET_PROFILE"]
 
 
 def test_cli_parse_excel_filters_and_reprocesses(tmp_path) -> None:

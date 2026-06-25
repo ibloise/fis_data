@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+from .types import ParsedExcelRowUpdate, RawExcelRow
 
 
 def normalize_profile_token(value: str) -> str:
@@ -33,6 +37,12 @@ class SheetProfile:
     required_headers: tuple[str, ...] = ()
     header_scan_rows: int = 20
     stub_status: str = "SKIPPED_METADATA"
+    headerless_columns: tuple[str, ...] = ()
+    column_aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    row_parser: Callable[
+        [RawExcelRow, dict[str, int], dict[str, Any]],
+        ParsedExcelRowUpdate,
+    ] | None = None
 
     def matches_sheet_name(self, sheet_name: str) -> bool:
         normalized_sheet = normalize_profile_token(sheet_name)
@@ -48,10 +58,16 @@ class FileProfile:
 
     kind: str
     filename_patterns: tuple[str, ...] = ("*",)
+    filename_regexes: tuple[str, ...] = ()
     sheet_profiles: tuple[SheetProfile, ...] = ()
 
     def matches_path(self, storage_path: str) -> bool:
         filename = Path(storage_path).name
+        if any(
+            re.search(pattern, filename, flags=re.IGNORECASE)
+            for pattern in self.filename_regexes
+        ):
+            return True
         normalized_filename = normalize_profile_token(filename)
         return any(
             fnmatch.fnmatch(normalized_filename, normalize_profile_pattern(pattern))
@@ -95,21 +111,3 @@ FARMACIA_EXCEL_PARSER = ExcelEntityParser(
         ),
     ),
 )
-
-PCR_EXCEL_PARSER = ExcelEntityParser(
-    entity_name="pcr",
-    parser_name="pcr-excel",
-    parser_version="0.1",
-    file_profiles=(
-        FileProfile(
-            kind="quantification_cq_results",
-            filename_patterns=("*quantification*cq*results*", "*cq*results*"),
-            sheet_profiles=(DEFAULT_SHEET_PROFILE,),
-        ),
-    ),
-)
-
-EXCEL_ENTITY_PARSERS = {
-    FARMACIA_EXCEL_PARSER.entity_name: FARMACIA_EXCEL_PARSER,
-    PCR_EXCEL_PARSER.entity_name: PCR_EXCEL_PARSER,
-}
