@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .types import ParsedExcelRowUpdate, RawExcelRow
+
+
+class RowParser(Protocol):
+    def __call__(
+        self, row: RawExcelRow, columns: Mapping[str, int], context: Mapping[str, Any]
+    ) -> ParsedExcelRowUpdate: ...
 
 
 def normalize_profile_token(value: str) -> str:
@@ -39,10 +45,7 @@ class SheetProfile:
     stub_status: str = "SKIPPED_METADATA"
     headerless_columns: tuple[str, ...] = ()
     column_aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    row_parser: Callable[
-        [RawExcelRow, dict[str, int], dict[str, Any]],
-        ParsedExcelRowUpdate,
-    ] | None = None
+    row_parser: RowParser | None = None
 
     def matches_sheet_name(self, sheet_name: str) -> bool:
         normalized_sheet = normalize_profile_token(sheet_name)
