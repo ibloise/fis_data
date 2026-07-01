@@ -19,8 +19,8 @@ These instructions apply to the whole repository.
 
 ## Development Guidelines
 
-- Work on a `codes/<feature>` branch by default and keep `main` clean.
-- Before committing repository changes, ensure the current branch is named after the current work, such as `codes/<feature>` or `codes/fix-<issue>`, unless the user explicitly asks for another branch.
+- Work on a `codex/<feature>` branch by default and keep `main` clean.
+- Before committing repository changes, ensure the current branch is named after the current work, such as `codex/<feature>` or `codex/fix-<issue>`, unless the user explicitly asks for another branch.
 - Prefer small, focused changes that match the repository's existing structure.
 - Use `rg` or `rg --files` for searches when available.
 - Keep generated files, caches, and local environment files out of version control.
