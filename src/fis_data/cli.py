@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import json
 import sys
+from dataclasses import asdict
 from collections.abc import Iterator
 from pathlib import Path
 from zipfile import is_zipfile
@@ -20,7 +21,10 @@ from .etl.excel_parse_job import ExcelParseJob
 from .etl.file_registry import register_file
 from .etl.ingest_excel import ingest_excel_file
 from .etl.ingest_text import ingest_text_file
+from .etl.materialization import MaterializationJob
+from .etl.materialization_registry import get_entity_materializer
 from .etl.microb_parse_job import MicrobParseJob
+from .etl.pcr_analytics import PCRAnalyticsJob
 from .schema import create_schema
 
 
@@ -504,6 +508,191 @@ def parse_excel(
     click.echo(json.dumps(results, ensure_ascii=False, indent=2))
     if failed:
         raise SystemExit(1)
+
+
+@cli.command("materialize")
+@click.option(
+    "--db-path",
+    type=click.Path(dir_okay=False),
+    help="SQLite database path.",
+)
+@click.option("--entity", "entity_name", required=True, help="Entity to materialize.")
+@click.option(
+    "--file-id",
+    type=int,
+    required=False,
+    help="File ID to materialize. If omitted, processes all pending files.",
+)
+@click.option(
+    "--batch-size",
+    type=click.IntRange(min=1),
+    default=1000,
+    show_default=True,
+)
+@click.option(
+    "--reprocess-all",
+    is_flag=True,
+    help="Replace domain records for selected files from all parsed payloads.",
+)
+def materialize(
+    db_path: str | None,
+    entity_name: str,
+    file_id: int | None,
+    batch_size: int,
+    reprocess_all: bool,
+) -> None:
+    """Materialize parsed payloads into normalized domain tables."""
+
+    materializer = get_entity_materializer(entity_name)
+    if materializer is None:
+        raise click.BadParameter(
+            f"No materializer registered for entity: {entity_name}",
+            param_hint="--entity",
+        )
+
+    engine = _engine_for_db_path(db_path)
+    create_schema(engine)
+    run_id = start_run(engine, pipeline_name=f"materialize:{entity_name.casefold()}")
+    job = MaterializationJob(engine, materializer)
+    file_ids = job.list_candidate_file_ids(
+        entity_name=entity_name,
+        file_id=file_id,
+        reprocess=reprocess_all,
+    )
+    if not file_ids:
+        finish_run(
+            engine,
+            run_id=run_id,
+            status=RunStatus.SUCCESS,
+            details_json=json.dumps({"entity_name": entity_name, "files": 0}),
+        )
+        click.echo("[]")
+        return
+
+    results = []
+    failed = False
+    with click.progressbar(
+        file_ids,
+        label=f"Materializing {entity_name}",
+        show_pos=True,
+        item_show_func=(
+            lambda candidate_file_id: (
+                f"file_id={candidate_file_id}"
+                if candidate_file_id is not None
+                else ""
+            )
+        ),
+        file=sys.stderr,
+    ) as progress:
+        for candidate_file_id in progress:
+            result = job.run(
+                ctx=JobContext(
+                    entity_name=entity_name,
+                    file_id=candidate_file_id,
+                    run_id=run_id,
+                ),
+                reprocess=reprocess_all,
+                batch_size=batch_size,
+            )
+            item = {
+                "file_id": candidate_file_id,
+                "ok": result.ok,
+                "error": result.error,
+                **result.metrics,
+            }
+            results.append(item)
+            failed = failed or not result.ok or item.get("status") == "LOAD_ERROR"
+
+    rows_seen = sum(int(result.get("rows_seen", 0)) for result in results)
+    rows_loaded = sum(int(result.get("rows_loaded", 0)) for result in results)
+    rows_error = sum(int(result.get("rows_error", 0)) for result in results)
+    source_errors = sum(int(result.get("source_errors", 0)) for result in results)
+    warnings = sum(int(result.get("warnings", 0)) for result in results)
+    click.echo(
+        "Materialization complete: "
+        f"{rows_loaded}/{rows_seen} rows loaded, {rows_error} load errors, "
+        f"{source_errors} source errors, "
+        f"{warnings} metadata conflicts.",
+        err=True,
+    )
+    finish_run(
+        engine,
+        run_id=run_id,
+        status=RunStatus.FAILED if failed else RunStatus.SUCCESS,
+        details_json=json.dumps(
+            {
+                "entity_name": entity_name,
+                "files": len(results),
+                "rows_seen": rows_seen,
+                "rows_loaded": rows_loaded,
+                "rows_error": rows_error,
+                "source_errors": source_errors,
+                "warnings": warnings,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    click.echo(json.dumps(results, ensure_ascii=False, indent=2))
+    if failed:
+        raise SystemExit(1)
+
+
+@cli.command("derive-pcr")
+@click.option(
+    "--db-path",
+    type=click.Path(dir_okay=False),
+    help="SQLite database path.",
+)
+@click.option(
+    "--algorithm-version",
+    required=True,
+    help="Version label for the melting interpretation algorithm.",
+)
+@click.option(
+    "--rebuild",
+    is_flag=True,
+    help="Delete and rebuild all derived PCR analytical data.",
+)
+def derive_pcr(
+    db_path: str | None,
+    algorithm_version: str,
+    rebuild: bool,
+) -> None:
+    """Build the versioned PCR analytical and QC model."""
+
+    engine = _engine_for_db_path(db_path)
+    create_schema(engine)
+    run_id = start_run(engine, pipeline_name="derive:pcr")
+    click.echo("Deriving PCR analytical model...", err=True)
+    try:
+        stats = PCRAnalyticsJob(engine).run(
+            algorithm_version=algorithm_version,
+            rebuild=rebuild,
+        )
+    except Exception as exc:
+        finish_run(
+            engine,
+            run_id=run_id,
+            status=RunStatus.FAILED,
+            details_json=json.dumps({"error": str(exc)}, ensure_ascii=False),
+        )
+        raise click.ClickException(str(exc)) from exc
+
+    details = asdict(stats)
+    finish_run(
+        engine,
+        run_id=run_id,
+        status=RunStatus.SUCCESS,
+        details_json=json.dumps(details, ensure_ascii=False),
+    )
+    click.echo(
+        "PCR derivation complete: "
+        f"{stats.interpretations} interpretations, "
+        f"{stats.target_qc_rows} target QC rows, "
+        f"{stats.episodes} episodes, {stats.review_items} review items.",
+        err=True,
+    )
+    click.echo(json.dumps(details, ensure_ascii=False, indent=2))
 
 
 @cli.command("parse-microb")
