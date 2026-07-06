@@ -65,7 +65,7 @@ def test_episode_pairing_and_latest_valid_result_rules() -> None:
     assert _run_components(
         [(1, "SCREENING"), (2, "PANEL_KPC_NDM"), (3, "PANEL_OXA48_VIM")],
         {1: {1, 2, 3}, 2: {1, 2, 3}, 3: {10}},
-    ) == [[(1, "SCREENING"), (2, "PANEL_KPC_NDM")], [(3, "PANEL_OXA48_VIM")]]
+    ) == [[(1, "SCREENING")], [(2, "PANEL_KPC_NDM")], [(3, "PANEL_OXA48_VIM")]]
 
     summary = _summarize_results(
         [
@@ -91,6 +91,31 @@ def test_episode_pairing_and_latest_valid_result_rules() -> None:
     assert summary["preferred"] == 1
     assert summary["relation"] == "CORRECTION"
     assert summary["concordance"] == "CONCORDANT"
+
+
+def test_screening_run_is_never_paired_in_episode_association() -> None:
+    repository = Mock(spec=PCRAnalyticsRepository)
+    repository.fetch_episode_inputs.return_value = (
+        [
+            (1, "SCREENING", "2024-01-01"),
+            (2, "PANEL_KPC_NDM", "2024-01-01"),
+            (3, "PANEL_OXA48_VIM", "2024-01-01"),
+        ],
+        {1: {101, 102}, 2: {101, 102}, 3: {101, 102}},
+    )
+    pipeline = PCRAnalyticsPipeline(repository)
+
+    assert pipeline.associate_episodes(7) == 2
+
+    inserted = repository.insert_episode.call_args_list
+    screening_episode = inserted[0].kwargs
+    panel_episode = inserted[1].kwargs
+    assert screening_episode["status"] == "AUTO"
+    assert screening_episode["review"] is None
+    assert [member.run_id for member in screening_episode["memberships"]] == [1]
+    assert panel_episode["status"] == "AUTO"
+    assert panel_episode["review"] is None
+    assert {member.run_id for member in panel_episode["memberships"]} == {2, 3}
 
 
 def test_typed_result_selection_prefers_latest_valid_candidate() -> None:

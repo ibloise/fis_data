@@ -127,7 +127,7 @@ def episode_date_key(run_name: str) -> str | None:
 def run_components(
     candidates: list[tuple[int, str]], samples: dict[int, set[int]]
 ) -> list[list[tuple[int, str]]]:
-    """Build connected run groups whose sample overlap reaches 80 percent."""
+    """Build connected non-screening run groups by sample overlap."""
 
     remaining = {run_id for run_id, _ in candidates}
     classes = dict(candidates)
@@ -139,10 +139,13 @@ def run_components(
         component_ids = set(pending)
         while pending:
             current = pending.pop()
+            if classes[current] == RunClasses.screening:
+                continue
             linked = {
                 other
                 for other in remaining
-                if overlap(samples[current], samples[other]) >= 0.8
+                if classes[other] != RunClasses.screening
+                and overlap(samples[current], samples[other]) >= 0.8
             }
             remaining -= linked
             pending.extend(linked)

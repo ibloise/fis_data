@@ -11,6 +11,7 @@ from ..enums import (
     EpisodeAssociationStatuses,
     PCRTargets,
     ResultLevels,
+    RunClasses,
     WellRoles,
 )
 from ..melting import (
@@ -281,11 +282,7 @@ class PCRAnalyticsPipeline:
                 else [[candidate] for candidate in candidates]
             )
             for position, component in enumerate(components, start=1):
-                status = (
-                    EpisodeAssociationStatuses.automatic
-                    if date_key and len(component) > 1
-                    else EpisodeAssociationStatuses.review
-                )
+                status = _episode_association_status(component, date_key)
                 review = (
                     None
                     if status == EpisodeAssociationStatuses.automatic
@@ -397,6 +394,19 @@ class PCRAnalyticsPipeline:
         """Return one active override from the current snapshot."""
 
         return self.overrides.get((item_type, subject_key))
+
+
+def _episode_association_status(
+    component: list[tuple[int, str]], date_key: str | None
+) -> str:
+    """Decide whether a run component is a complete episode or needs review."""
+
+    run_classes = {run_class for _, run_class in component}
+    if run_classes == {RunClasses.screening}:
+        return EpisodeAssociationStatuses.automatic
+    if date_key and len(component) > 1:
+        return EpisodeAssociationStatuses.automatic
+    return EpisodeAssociationStatuses.review
 
 
 def _interpretation_records(
