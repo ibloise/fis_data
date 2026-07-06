@@ -345,9 +345,7 @@ pcr_rfu_measurement = Table(
     Column("axis_kind", String(40), nullable=False),
     Column("axis_value", Float, nullable=False),
     Column("rfu", Float, nullable=True),
-    UniqueConstraint(
-        "raw_excel_row_id", "pcr_well_id", name="uq_pcr_rfu_raw_row_well"
-    ),
+    UniqueConstraint("raw_excel_row_id", "pcr_well_id", name="uq_pcr_rfu_raw_row_well"),
 )
 
 pcr_derivation_run = Table(
@@ -455,7 +453,9 @@ pcr_interpretation = Table(
     Column("metrics_json", Text, nullable=True),
     Column("error", Text, nullable=True),
     UniqueConstraint(
-        "derivation_id", "pcr_cq_result_id", "canonical_target",
+        "derivation_id",
+        "pcr_cq_result_id",
+        "canonical_target",
         name="uq_pcr_interpretation_derivation_result_target",
     ),
 )
@@ -560,6 +560,28 @@ pcr_result_selection = Table(
     Column("details_json", Text, nullable=False),
 )
 
+pcr_review_action = Table(
+    "pcr_review_action",
+    metadata,
+    Column("review_action_id", Integer, primary_key=True, autoincrement=True),
+    Column("item_type", String(30), nullable=False),
+    Column("subject_key", String(255), nullable=False),
+    Column("issue_fingerprint", String(64), nullable=False),
+    Column("source_derivation_id", Integer, nullable=False),
+    Column("action", String(30), nullable=False),
+    Column("resolution", String(30), nullable=True),
+    Column("override_kind", String(30), nullable=True),
+    Column("payload_json", Text, nullable=True),
+    Column("reason", Text, nullable=False),
+    Column("reviewer", String(100), nullable=False),
+    Column(
+        "created_at",
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
 Index("idx_file_registry_source", ctl_file_registry.c.source_name)
 Index(
     "idx_ctl_etl_run_pipeline_started",
@@ -630,6 +652,12 @@ Index(
 Index("idx_pcr_interpretation_well", pcr_interpretation.c.pcr_well_id)
 Index("idx_pcr_well_classification_sample", pcr_well_classification.c.pcr_sample_id)
 Index("idx_pcr_episode_run_run", pcr_episode_run.c.pcr_run_id)
+Index(
+    "idx_pcr_review_action_subject",
+    pcr_review_action.c.item_type,
+    pcr_review_action.c.subject_key,
+    pcr_review_action.c.review_action_id,
+)
 
 
 def create_schema(engine: Engine) -> None:

@@ -105,3 +105,36 @@ specific assays select one best peak for their canonical target.
 Current analytical results are exposed through `v_pcr_current_result`,
 `v_pcr_result_history`, `v_pcr_run_qc`, `v_pcr_episodes`, and
 `v_pcr_review_queue`.
+
+## PCR Analytical Review
+
+La guía completa de conceptos, comandos, overrides y flujo operativo está en
+[`docs/pcr-review.md`](docs/pcr-review.md), incluyendo el detalle de los
+estados `OPEN`/`RESOLVED` y de las causas analíticas que generan necesidades de
+revisión para pozos, runs, episodios, QC y resultados.
+
+Review items without updating analytical tables directly:
+
+```bash
+fis-data pcr-review --db-path var/fis_data.sqlite list --format table
+fis-data pcr-review --db-path var/fis_data.sqlite show \
+  --type RESULT --subject sample:123:target:KPC
+```
+
+Every resolution or correction requires an explicit reviewer, reason,
+derivation ID, and the current fingerprint printed by `list` or `show`. Commands under
+`pcr-review override` provide validated corrections for wells, runs, episodes,
+target QC, and final results. `resolve`, `reopen`, `revoke`, and `history` append
+audit events; previous actions are never updated or deleted.
+
+Apply active overrides through a new rebuildable derivation:
+
+```bash
+fis-data pcr-review --db-path var/fis_data.sqlite apply \
+  --algorithm-version melting-v1 --reviewer analyst
+```
+
+Review actions survive analytical rebuilds. Base evidence remains available in
+the existing views, while `v_pcr_effective_result` exposes the effective final
+call and whether it has a manual override. Use `derive-pcr --ignore-overrides`
+to reproduce the unmodified algorithm output for diagnostics.

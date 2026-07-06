@@ -164,7 +164,9 @@ class ResultCandidate:
     """Persisted interpretation considered during result selection."""
 
     interpretation_id: int
+    result_id: int
     sample_id: int
+    sample_key: str
     target: str
     call: str
     run_id: int

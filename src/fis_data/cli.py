@@ -25,6 +25,7 @@ from .etl.materialization import MaterializationJob
 from .etl.materialization_registry import get_entity_materializer
 from .etl.microb_parse_job import MicrobParseJob
 from .etl.pcr.analytics import PCRAnalyticsJob
+from .etl.pcr.review.cli import pcr_review
 from .schema import create_schema
 
 
@@ -33,6 +34,9 @@ def cli() -> None:
     """FIS data management CLI."""
 
     load_dotenv()
+
+
+cli.add_command(pcr_review)
 
 
 def _engine_for_db_path(db_path: str | None) -> Engine:
@@ -451,9 +455,7 @@ def parse_excel(
         show_pos=True,
         item_show_func=(
             lambda pending_file_id: (
-                f"file_id={pending_file_id}"
-                if pending_file_id is not None
-                else ""
+                f"file_id={pending_file_id}" if pending_file_id is not None else ""
             )
         ),
         file=sys.stderr,
@@ -577,9 +579,7 @@ def materialize(
         show_pos=True,
         item_show_func=(
             lambda candidate_file_id: (
-                f"file_id={candidate_file_id}"
-                if candidate_file_id is not None
-                else ""
+                f"file_id={candidate_file_id}" if candidate_file_id is not None else ""
             )
         ),
         file=sys.stderr,
@@ -653,10 +653,16 @@ def materialize(
     is_flag=True,
     help="Delete and rebuild all derived PCR analytical data.",
 )
+@click.option(
+    "--ignore-overrides",
+    is_flag=True,
+    help="Run the derivation without active PCR review overrides.",
+)
 def derive_pcr(
     db_path: str | None,
     algorithm_version: str,
     rebuild: bool,
+    ignore_overrides: bool,
 ) -> None:
     """Build the versioned PCR analytical and QC model."""
 
@@ -668,6 +674,7 @@ def derive_pcr(
         stats = PCRAnalyticsJob(engine).run(
             algorithm_version=algorithm_version,
             rebuild=rebuild,
+            ignore_overrides=ignore_overrides,
         )
     except Exception as exc:
         finish_run(
@@ -754,9 +761,7 @@ def parse_microb(
         show_pos=True,
         item_show_func=(
             lambda pending_file_id: (
-                f"file_id={pending_file_id}"
-                if pending_file_id is not None
-                else ""
+                f"file_id={pending_file_id}" if pending_file_id is not None else ""
             )
         ),
         file=sys.stderr,

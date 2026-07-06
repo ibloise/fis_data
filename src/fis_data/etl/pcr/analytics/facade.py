@@ -9,6 +9,8 @@ from sqlalchemy.engine import Engine
 
 from ..enums import DerivationStatuses
 from ..melting import MeltingParameters
+from ..review.models import ActiveOverride
+from ..review.repository import PCRReviewRepository
 from .domain import (
     classify_run,
     classify_sample_name,
@@ -47,6 +49,7 @@ class PCRAnalyticsJob:
         *,
         repository: PCRAnalyticsRepository | None = None,
         pipeline: PCRAnalyticsPipeline | None = None,
+        review_repository: PCRReviewRepository | None = None,
     ) -> None:
         if repository is None:
             if engine is None:
@@ -56,6 +59,9 @@ class PCRAnalyticsJob:
             repository = PCRAnalyticsRepository(engine)
         self.repository = repository
         self.pipeline = pipeline or PCRAnalyticsPipeline(self.repository)
+        self.review_repository = review_repository or (
+            PCRReviewRepository(engine) if engine is not None else None
+        )
 
     def run(
         self,
@@ -63,10 +69,15 @@ class PCRAnalyticsJob:
         algorithm_version: str,
         params: MeltingParameters | None = None,
         rebuild: bool = False,
+        ignore_overrides: bool = False,
     ) -> DerivationStats:
         """Run all analytical stages and record a terminal derivation status."""
 
         current = params or MeltingParameters()
+        overrides: list[ActiveOverride] = []
+        if not ignore_overrides and self.review_repository is not None:
+            overrides = self.review_repository.active_overrides()
+        self.pipeline.set_overrides(overrides)
         derivation_id = self.repository.start_derivation(
             algorithm_version=algorithm_version,
             parameters_json=_json(current.as_dict()),
@@ -123,7 +134,9 @@ def _summarize_results(items: list[dict[str, Any]], *, target: str) -> dict[str,
     candidates = [
         ResultCandidate(
             interpretation_id=int(item["id"]),
+            result_id=int(item.get("result_id", item["id"])),
             sample_id=int(item.get("sample_id", 0)),
+            sample_key=str(item.get("sample_key", "")),
             target=target,
             call=str(item["call"]),
             run_id=int(item["run_id"]),

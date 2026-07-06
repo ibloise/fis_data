@@ -442,7 +442,9 @@ class PCRAnalyticsRepository:
                 text(
                     """
                     SELECT interpretation.interpretation_id,
+                           interpretation.pcr_cq_result_id,
                            classification.pcr_sample_id,
+                           sample.sample_key,
                            interpretation.canonical_target, interpretation.call,
                            interpretation.pcr_run_id, analysis.run_started,
                            analysis.run_class, qc.is_valid
@@ -453,6 +455,8 @@ class PCRAnalyticsRepository:
                     JOIN pcr_run_analysis AS analysis
                       ON analysis.derivation_id = interpretation.derivation_id
                      AND analysis.pcr_run_id = interpretation.pcr_run_id
+                    JOIN pcr_sample AS sample
+                      ON sample.pcr_sample_id=classification.pcr_sample_id
                     LEFT JOIN pcr_target_qc AS qc
                       ON qc.derivation_id = interpretation.derivation_id
                      AND qc.pcr_run_id = interpretation.pcr_run_id
@@ -469,13 +473,15 @@ class PCRAnalyticsRepository:
         return [
             ResultCandidate(
                 interpretation_id=int(row[0]),
-                sample_id=int(row[1]),
-                target=str(row[2]),
-                call=str(row[3]),
-                run_id=int(row[4]),
-                started=_optional_str(row[5]),
-                run_class=str(row[6]),
-                valid=bool(row[7]),
+                result_id=int(row[1]),
+                sample_id=int(row[2]),
+                sample_key=str(row[3]),
+                target=str(row[4]),
+                call=str(row[5]),
+                run_id=int(row[6]),
+                started=_optional_str(row[7]),
+                run_class=str(row[8]),
+                valid=bool(row[9]),
             )
             for row in rows
         ]
@@ -586,6 +592,41 @@ def _analytical_views() -> dict[str, str]:
               ON interpretation.interpretation_id =
                  selection.preferred_interpretation_id
             WHERE selection.derivation_id = ({latest})
+        """,
+        "v_pcr_effective_result": f"""
+            WITH ranked_override AS (
+                SELECT item_type, subject_key, action, payload_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY item_type, subject_key
+                           ORDER BY review_action_id DESC
+                       ) AS position
+                FROM pcr_review_action
+                WHERE item_type='RESULT' AND action IN ('OVERRIDE', 'REVOKE')
+            )
+            SELECT sample.sample_key, selection.canonical_target,
+                   COALESCE(
+                       json_extract(override.payload_json, '$.call'),
+                       interpretation.call
+                   ) AS call,
+                   interpretation.cq, interpretation.peak_temperature,
+                   interpretation.pcr_run_id, selection.occurrence_count,
+                   selection.relation_kind, selection.concordance,
+                   selection.needs_review,
+                   CASE WHEN override.action='OVERRIDE' THEN 1 ELSE 0 END
+                       AS has_override
+            FROM pcr_result_selection AS selection
+            JOIN pcr_sample AS sample
+              ON sample.pcr_sample_id=selection.pcr_sample_id
+            LEFT JOIN pcr_interpretation AS interpretation
+              ON interpretation.interpretation_id=
+                 selection.preferred_interpretation_id
+            LEFT JOIN ranked_override AS override
+              ON override.position=1 AND override.action='OVERRIDE'
+             AND override.subject_key=(
+                 'sample:' || sample.sample_key || ':target:' ||
+                 selection.canonical_target
+             )
+            WHERE selection.derivation_id=({latest})
         """,
         "v_pcr_result_history": f"""
             SELECT sample.sample_key, interpretation.canonical_target,

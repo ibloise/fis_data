@@ -18,6 +18,8 @@ from fis_data.etl.pcr.analytics.models import ResultCandidate
 from fis_data.etl.pcr.analytics.pipeline import PCRAnalyticsPipeline
 from fis_data.etl.pcr.analytics.repository import PCRAnalyticsRepository
 from fis_data.etl.pcr.melting import MeltingParameters, calculate_peaks, interpret_curve
+from fis_data.etl.pcr.review.repository import PCRReviewRepository
+from fis_data.etl.pcr.review.service import PCRReviewService
 from fis_data.schema import (
     create_schema,
     ctl_etl_run,
@@ -95,7 +97,9 @@ def test_typed_result_selection_prefers_latest_valid_candidate() -> None:
     candidates = [
         ResultCandidate(
             interpretation_id=1,
+            result_id=1,
             sample_id=7,
+            sample_key="7",
             target="KPC",
             call="POSITIVE",
             run_id=1,
@@ -105,7 +109,9 @@ def test_typed_result_selection_prefers_latest_valid_candidate() -> None:
         ),
         ResultCandidate(
             interpretation_id=2,
+            result_id=2,
             sample_id=7,
+            sample_key="7",
             target="KPC",
             call="POSITIVE",
             run_id=2,
@@ -143,6 +149,7 @@ def test_analytics_job_is_a_facade_over_injected_collaborators() -> None:
     assert stats.result_groups == 5
     repository.start_derivation.assert_called_once()
     pipeline.classify_runs.assert_called_once_with(42)
+    pipeline.set_overrides.assert_called_once_with([])
     repository.finish_derivation.assert_called_once()
     repository.create_views.assert_called_once_with()
 
@@ -308,6 +315,89 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
     assert target_qc == ("INVALID", 0)
     assert selection == ("123", None, "NO_VALID_RESULT", 1)
 
+    review_service = PCRReviewService(PCRReviewRepository(engine))
+    review_items = review_service.list_items(limit=20)
+    well_item = next(item for item in review_items if item.item_type == "WELL")
+    episode_item = next(item for item in review_items if item.item_type == "EPISODE")
+    qc_item = next(item for item in review_items if item.item_type == "TARGET_QC")
+    result_item = next(item for item in review_items if item.item_type == "RESULT")
+    review_service.override_well(
+        subject_key=well_item.subject_key,
+        fingerprint=well_item.fingerprint,
+        derivation_id=well_item.derivation_id,
+        role="REAL_SAMPLE",
+        sample_key="999",
+        reason="Known sample",
+        reviewer="tester",
+    )
+    review_service.override_episode(
+        subject_key=episode_item.subject_key,
+        fingerprint=episode_item.fingerprint,
+        derivation_id=episode_item.derivation_id,
+        run_ids=(pcr_run_id,),
+        reason="Confirmed episode",
+        reviewer="tester",
+    )
+    review_service.override_qc(
+        subject_key=qc_item.subject_key,
+        fingerprint=qc_item.fingerprint,
+        derivation_id=qc_item.derivation_id,
+        status="VALID",
+        valid=True,
+        reason="Accepted controls",
+        reviewer="tester",
+    )
+    review_service.override_result(
+        subject_key=result_item.subject_key,
+        fingerprint=result_item.fingerprint,
+        derivation_id=result_item.derivation_id,
+        preferred_result_id=cq_ids["00123"],
+        call="NEGATIVE",
+        reason="Manual final call",
+        reviewer="tester",
+    )
+
+    PCRAnalyticsJob(engine).run(algorithm_version="test-override", rebuild=True)
+    with engine.begin() as conn:
+        overridden_selection = conn.execute(
+            text(
+                """
+                SELECT preferred_interpretation_id, needs_review
+                FROM pcr_result_selection
+                WHERE canonical_target='KPC'
+                """
+            )
+        ).one()
+        effective_call = conn.execute(
+            text(
+                """
+                SELECT call, has_override FROM v_pcr_effective_result
+                WHERE sample_key='123' AND canonical_target='KPC'
+                """
+            )
+        ).one()
+        overridden_well = conn.execute(
+            text(
+                """
+                SELECT well_role, normalized_name
+                FROM pcr_well_classification
+                WHERE pcr_well_id=:well_id
+                """
+            ),
+            {"well_id": well_ids["PRUEBA"]},
+        ).one()
+        manual_episode = conn.execute(
+            text(
+                "SELECT episode_key FROM pcr_episode WHERE episode_key LIKE 'MANUAL:%'"
+            )
+        ).scalar_one()
+
+    assert overridden_selection[0] is not None
+    assert overridden_selection[1] == 0
+    assert effective_call == ("NEGATIVE", 1)
+    assert overridden_well == ("REAL_SAMPLE", "999")
+    assert manual_episode.startswith("MANUAL:")
+
     cli_result = CliRunner().invoke(
         cli,
         [
@@ -317,8 +407,33 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
             "--algorithm-version",
             "test-v2",
             "--rebuild",
+            "--ignore-overrides",
         ],
     )
     assert cli_result.exit_code == 0, cli_result.output
     assert json.loads(cli_result.stdout)["algorithm_version"] == "test-v2"
     assert "PCR derivation complete" in cli_result.stderr
+    with engine.connect() as conn:
+        ignored_preferred = conn.execute(
+            text(
+                """
+                SELECT preferred_interpretation_id
+                FROM pcr_result_selection
+                WHERE canonical_target='KPC'
+                """
+            )
+        ).scalar_one()
+        violations = conn.execute(text("PRAGMA foreign_key_check")).all()
+    assert ignored_preferred is None
+    analytical_tables = {
+        "pcr_well_classification",
+        "pcr_run_analysis",
+        "pcr_interpretation",
+        "pcr_target_qc",
+        "pcr_run_qc",
+        "pcr_episode",
+        "pcr_episode_run",
+        "pcr_result_selection",
+        "pcr_review_action",
+    }
+    assert [row for row in violations if row[0] in analytical_tables] == []
