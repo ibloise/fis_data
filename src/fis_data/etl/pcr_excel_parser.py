@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from .excel_profiles import ExcelEntityParser, FileProfile, SheetProfile
+from .pcr_enums import PCRAxisKinds, PCRFileKinds, PCRSheetKinds, PCRSheetPatterns
 from .types import ExcelParseStatus, ParsedExcelRowUpdate, RawExcelRow
 
 PCR_QUANTIFICATION_CQ_COLUMNS = {
@@ -90,7 +91,7 @@ def parse_amplification_sybr_row(
         row=row,
         header_index=header_index,
         context=context,
-        axis_field="cycle",
+        axis_field=PCRAxisKinds.cycle,
         axis_parser=_required_int,
     )
 
@@ -106,7 +107,7 @@ def parse_melt_curve_sybr_row(
         row=row,
         header_index=header_index,
         context=context,
-        axis_field="temperature",
+        axis_field=PCRAxisKinds.temperature,
         axis_parser=_required_float,
     )
 
@@ -313,7 +314,7 @@ def parse_run_information_row(
 
 
 QUANTIFICATION_CQ_RESULTS_SHEET = SheetProfile(
-    kind="cq_results",
+    kind=PCRSheetKinds.cq_results,
     sheet_name_patterns=("0", "*sheet1*", "*results*", "*cq*"),
     required_headers=(
         "well",
@@ -331,8 +332,8 @@ QUANTIFICATION_CQ_RESULTS_SHEET = SheetProfile(
 )
 
 AMPLIFICATION_SYBR_SHEET = SheetProfile(
-    kind="amplification_sybr",
-    sheet_name_patterns=("sybr",),
+    kind=PCRSheetKinds.amplification_sybr,
+    sheet_name_patterns=(PCRSheetPatterns.sybr,),
     required_headers=("cycle",),
     header_scan_rows=20,
     column_aliases={"cycle": ("cycle",)},
@@ -340,8 +341,8 @@ AMPLIFICATION_SYBR_SHEET = SheetProfile(
 )
 
 MELT_CURVE_SYBR_SHEET = SheetProfile(
-    kind="melt_curve_sybr",
-    sheet_name_patterns=("sybr",),
+    kind=PCRSheetKinds.melt_curve_sybr,
+    sheet_name_patterns=(PCRSheetPatterns.sybr,),
     required_headers=("temperature",),
     header_scan_rows=20,
     column_aliases={"temperature": ("temperature",)},
@@ -349,8 +350,8 @@ MELT_CURVE_SYBR_SHEET = SheetProfile(
 )
 
 MELT_CURVE_DERIVATIVE_SYBR_SHEET = SheetProfile(
-    kind="melt_curve_derivative_sybr",
-    sheet_name_patterns=("sybr",),
+    kind=PCRSheetKinds.melt_curve_derivative_sybr,
+    sheet_name_patterns=(PCRSheetPatterns.sybr,),
     required_headers=("temperature",),
     header_scan_rows=20,
     column_aliases={"temperature": ("temperature",)},
@@ -358,7 +359,7 @@ MELT_CURVE_DERIVATIVE_SYBR_SHEET = SheetProfile(
 )
 
 RUN_INFORMATION_SHEET = SheetProfile(
-    kind="run_information",
+    kind=PCRSheetKinds.run_information,
     sheet_name_patterns=("run information",),
     required_headers=(),
     header_scan_rows=1,
@@ -373,25 +374,25 @@ PCR_EXCEL_PARSER = ExcelEntityParser(
     parser_version="0.2",
     file_profiles=(
         FileProfile(
-            kind="quantification_cq_results",
+            kind=PCRFileKinds.quantification_cq_results,
             filename_patterns=(),
             filename_regexes=(r".*Quantification Cq Results\.xlsx$",),
             sheet_profiles=(QUANTIFICATION_CQ_RESULTS_SHEET, RUN_INFORMATION_SHEET),
         ),
         FileProfile(
-            kind="quantification_amplification_results",
+            kind=PCRFileKinds.quantification_amplification_results,
             filename_patterns=(),
             filename_regexes=(r".*Quantification Amplification Results\.xlsx$",),
             sheet_profiles=(AMPLIFICATION_SYBR_SHEET, RUN_INFORMATION_SHEET),
         ),
         FileProfile(
-            kind="melt_curve_rfu_results",
+            kind=PCRFileKinds.melt_curve_rfu_results,
             filename_patterns=(),
             filename_regexes=(r".*Melt Curve RFU Results\.xlsx$",),
             sheet_profiles=(MELT_CURVE_SYBR_SHEET, RUN_INFORMATION_SHEET),
         ),
         FileProfile(
-            kind="melt_curve_derivative_results",
+            kind=PCRFileKinds.melt_curve_derivative_results,
             filename_patterns=(),
             filename_regexes=(r".*Melt Curve Derivative Results\.xlsx$",),
             sheet_profiles=(

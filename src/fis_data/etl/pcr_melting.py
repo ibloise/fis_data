@@ -8,12 +8,13 @@ from typing import Any
 import numpy as np
 from scipy.signal import find_peaks
 
+from .pcr_enums import PCRTargetAliases, PCRTargets, ResultLevels
 
 CANONICAL_TARGET_TEMPERATURES = {
-    "OXA48": 79.5,
-    "VIM": 82.0,
-    "NDM": 86.0,
-    "KPC": 88.0,
+    PCRTargets.oxa48: 79.5,
+    PCRTargets.vim: 82.0,
+    PCRTargets.ndm: 86.0,
+    PCRTargets.kpc: 88.0,
 }
 
 
@@ -51,10 +52,10 @@ class MeltingCall:
 
 def canonical_target(target: str) -> str:
     normalized = target.strip().upper()
-    if normalized == "OXA":
-        return "OXA48"
-    if normalized == "SCREENING":
-        return "Screening"
+    if normalized == PCRTargetAliases.oxa:
+        return PCRTargets.oxa48
+    if normalized == PCRTargetAliases.screening:
+        return PCRTargets.screening
     return normalized
 
 
@@ -106,20 +107,20 @@ def interpret_curve(
     """Interpret one specific (unimodal) or Screening (multimodal) curve."""
 
     target = canonical_target(source_target)
-    if target == "16S":
+    if target == PCRTargets.control_16s:
         call = (
-            "POSITIVE"
+            ResultLevels.positive
             if cq is not None and params.cq_lower_limit < cq < params.cq_upper_limit
-            else "NEGATIVE"
+            else ResultLevels.negative
         )
-        return [MeltingCall(target="16S", call=call)], []
-    if target in {"FAIL", "FAIL-2"} or (
-        target != "Screening" and target not in params.targets
+        return [MeltingCall(target=PCRTargets.control_16s, call=call)], []
+    if target in {PCRTargets.fail, PCRTargets.fail_2} or (
+        target != PCRTargets.screening and target not in params.targets
     ):
         return [
             MeltingCall(
                 target=target,
-                call="INDETERMINATE",
+                call=ResultLevels.indeterminate,
                 error=f"Unsupported target: {source_target}",
             )
         ], []
@@ -129,11 +130,16 @@ def interpret_curve(
         derivatives=derivatives,
         params=params,
     )
+    # Screening evaluates all the targets. Specific targets only evaluate themselves.
     targets = (
-        params.targets if target == "Screening" else {target: params.targets[target]}
+        params.targets
+        if target == PCRTargets.screening
+        else {target: params.targets[target]}
     )
     cq_valid = cq is not None and cq > params.cq_lower_limit
-    if target != "Screening":
+
+    # Algo is more generous in Screening.
+    if target != PCRTargets.screening:
         cq_valid = cq_valid and cq < params.cq_upper_limit
 
     calls: list[MeltingCall] = []
@@ -148,7 +154,9 @@ def interpret_curve(
         calls.append(
             MeltingCall(
                 target=output_target,
-                call="POSITIVE" if cq_valid and best is not None else "NEGATIVE",
+                call=ResultLevels.positive
+                if cq_valid and best is not None
+                else ResultLevels.negative,
                 peak_temperature=best.temperature if best else None,
                 peak_deriv_rfu=best.deriv_rfu if best else None,
             )

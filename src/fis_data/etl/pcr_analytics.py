@@ -12,6 +12,19 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from .pcr_enums import (
+    ClassificationRules,
+    ConcordanceLevels,
+    DerivationStatuses,
+    EpisodeAssociationStatuses,
+    PCRTargets,
+    QCIssues,
+    QCStatuses,
+    ResultLevels,
+    ResultRelations,
+    RunClasses,
+    WellRoles,
+)
 from .pcr_melting import (
     MeltingCall,
     MeltingParameters,
@@ -23,7 +36,12 @@ from .pcr_melting import (
 RULE_VERSION = "1.0"
 POSITIVE_CONTROLS = {"CP", "C+", "CPNEW", "CPOLD"}
 NEGATIVE_CONTROLS = {"CN", "C-", "CNEG"}
-CARBAPENEMASE_TARGETS = {"OXA48", "VIM", "KPC", "NDM"}
+CARBAPENEMASE_TARGETS = {
+    PCRTargets.oxa48,
+    PCRTargets.vim,
+    PCRTargets.kpc,
+    PCRTargets.ndm,
+}
 
 
 @dataclass(frozen=True)
@@ -85,7 +103,7 @@ class PCRAnalyticsJob:
                 _finish_derivation(
                     conn,
                     derivation_id,
-                    status="SUCCESS",
+                    status=DerivationStatuses.success,
                     details=asdict(stats),
                 )
                 _create_views(conn)
@@ -95,7 +113,7 @@ class PCRAnalyticsJob:
                 _finish_derivation(
                     conn,
                     derivation_id,
-                    status="FAILED",
+                    status=DerivationStatuses.failed,
                     details={"error": str(exc)},
                 )
             raise
@@ -134,7 +152,7 @@ class PCRAnalyticsJob:
                 classification = _classify_sample_name(sample_name)
                 sample_key = (
                     _sample_key(str(sample_name))
-                    if classification[0] == "REAL_SAMPLE"
+                    if classification[0] == WellRoles.real_sample
                     else None
                 )
                 payload.append(
@@ -291,7 +309,11 @@ class PCRAnalyticsJob:
             if well_id in interpreted_wells:
                 continue
             target = canonical_target(cq_row["target"])
-            if target in {"16S", "FAIL", "FAIL-2"}:
+            if target in {
+                PCRTargets.control_16s,
+                PCRTargets.fail,
+                PCRTargets.fail_2,
+            }:
                 inserts.extend(
                     _interpretation_payload(derivation_id, cq_row, [], [], params)
                 )
@@ -302,7 +324,7 @@ class PCRAnalyticsJob:
                         cq_row,
                         MeltingCall(
                             target=target,
-                            call="ERROR",
+                            call=ResultLevels.error,
                             error="Missing melt-curve derivative data.",
                         ),
                         [],
@@ -353,21 +375,25 @@ class PCRAnalyticsJob:
             target_payload = []
             run_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
             for (run_id, target), roles in grouped.items():
-                positive = roles.get("POSITIVE_CONTROL", [])
-                negative = roles.get("NEGATIVE_CONTROL", [])
+                positive = roles.get(WellRoles.positive_control, [])
+                negative = roles.get(WellRoles.negative_control, [])
                 warnings = []
                 failures = []
                 if not positive:
-                    warnings.append("MISSING_POSITIVE_CONTROL")
+                    warnings.append(QCIssues.missing_positive_control)
                 if not negative:
-                    warnings.append("MISSING_NEGATIVE_CONTROL")
-                if any(call != "POSITIVE" for call in positive):
-                    failures.append("POSITIVE_CONTROL_NOT_POSITIVE")
-                if any(call == "POSITIVE" for call in negative):
-                    failures.append("NEGATIVE_CONTROL_POSITIVE")
-                if any(call == "INDETERMINATE" for call in negative):
-                    warnings.append("NEGATIVE_CONTROL_INDETERMINATE")
-                status = "INVALID" if failures else ("WARNING" if warnings else "VALID")
+                    warnings.append(QCIssues.missing_negative_control)
+                if any(call != ResultLevels.positive for call in positive):
+                    failures.append(QCIssues.positive_control_not_positive)
+                if any(call == ResultLevels.positive for call in negative):
+                    failures.append(QCIssues.negative_control_positive)
+                if any(call == ResultLevels.indeterminate for call in negative):
+                    warnings.append(QCIssues.negative_control_indeterminate)
+                status = (
+                    QCStatuses.invalid
+                    if failures
+                    else (QCStatuses.warning if warnings else QCStatuses.valid)
+                )
                 item = {
                     "derivation_id": derivation_id,
                     "run_id": run_id,
@@ -402,13 +428,13 @@ class PCRAnalyticsJob:
                     bool(json.loads(item["warnings"])) for item in items
                 )
                 if invalid == len(items):
-                    status = "INVALID"
+                    status = QCStatuses.invalid
                 elif invalid:
-                    status = "PARTIALLY_INVALID"
+                    status = QCStatuses.partially_invalid
                 elif warning_count:
-                    status = "VALID_WITH_WARNINGS"
+                    status = QCStatuses.valid_with_warnings
                 else:
-                    status = "VALID"
+                    status = QCStatuses.valid
                 run_payload.append(
                     {
                         "derivation_id": derivation_id,
@@ -475,8 +501,16 @@ class PCRAnalyticsJob:
                     else [[candidate] for candidate in candidates]
                 )
                 for position, component in enumerate(components, start=1):
-                    status = "AUTO" if date_key and len(component) > 1 else "REVIEW"
-                    review = None if status == "AUTO" else "No unambiguous run partner."
+                    status = (
+                        EpisodeAssociationStatuses.automatic
+                        if date_key and len(component) > 1
+                        else EpisodeAssociationStatuses.review
+                    )
+                    review = (
+                        None
+                        if status == EpisodeAssociationStatuses.automatic
+                        else "No unambiguous run partner."
+                    )
                     episode_key = f"{date_key or 'UNPARSED'}:{position:02d}"
                     result = conn.execute(
                         text(
@@ -633,19 +667,29 @@ class PCRAnalyticsJob:
 
 def _classify_sample_name(value: Any) -> tuple[str, str | None, str, str | None]:
     if value is None or not str(value).strip():
-        return "NON_SAMPLE_REVIEW", None, "EMPTY", "Missing sample name."
+        return (
+            WellRoles.non_sample_review,
+            None,
+            ClassificationRules.empty,
+            "Missing sample name.",
+        )
     raw = str(value).strip()
     if raw.isdigit():
-        return "REAL_SAMPLE", _sample_key(raw), "NUMERIC", None
+        return (
+            WellRoles.real_sample,
+            _sample_key(raw),
+            ClassificationRules.numeric,
+            None,
+        )
     normalized = re.sub(r"\s+", "", raw.upper())
     if normalized in POSITIVE_CONTROLS:
-        return "POSITIVE_CONTROL", normalized, normalized, None
+        return WellRoles.positive_control, normalized, normalized, None
     if normalized in NEGATIVE_CONTROLS:
-        return "NEGATIVE_CONTROL", normalized, normalized, None
+        return WellRoles.negative_control, normalized, normalized, None
     return (
-        "NON_SAMPLE_REVIEW",
+        WellRoles.non_sample_review,
         normalized,
-        "UNKNOWN_TEXT",
+        ClassificationRules.unknown_text,
         "Non-numeric sample name is not a known control.",
     )
 
@@ -659,15 +703,23 @@ def _sample_key(value: str) -> str:
 
 
 def _run_class(targets: set[str]) -> tuple[str, str | None]:
-    if "Screening" in targets:
-        return "SCREENING", None
-    if {"16S", "OXA48", "VIM"}.issubset(targets):
-        return "PANEL_OXA48_VIM", None
-    if {"16S", "KPC", "NDM"}.issubset(targets):
-        return "PANEL_KPC_NDM", None
+    if PCRTargets.screening in targets:
+        return RunClasses.screening, None
+    if {
+        PCRTargets.control_16s,
+        PCRTargets.oxa48,
+        PCRTargets.vim,
+    }.issubset(targets):
+        return RunClasses.panel_oxa48_vim, None
+    if {
+        PCRTargets.control_16s,
+        PCRTargets.kpc,
+        PCRTargets.ndm,
+    }.issubset(targets):
+        return RunClasses.panel_kpc_ndm, None
     if targets & CARBAPENEMASE_TARGETS:
-        return "COMPENSATION_PARTIAL", None
-    return "OTHER", f"Unrecognized target set: {sorted(targets)}"
+        return RunClasses.compensation_partial, None
+    return RunClasses.other, f"Unrecognized target set: {sorted(targets)}"
 
 
 def _parse_cfx_datetime(value: Any) -> str | None:
@@ -726,13 +778,12 @@ def _overlap(left: set[int], right: set[int]) -> float:
     return len(left & right) / min(len(left), len(right))
 
 
-def _summarize_results(
-    items: list[dict[str, Any]], *, target: str
-) -> dict[str, Any]:
+def _summarize_results(items: list[dict[str, Any]], *, target: str) -> dict[str, Any]:
     valid = [
         item
         for item in items
-        if item["valid"] and item["call"] in {"POSITIVE", "NEGATIVE"}
+        if item["valid"]
+        and item["call"] in {ResultLevels.positive, ResultLevels.negative}
     ]
     valid.sort(
         key=lambda item: (str(item["started"] or ""), item["run_id"]),
@@ -741,16 +792,16 @@ def _summarize_results(
     calls = {item["call"] for item in valid}
     classes = {item["run_class"] for item in items}
     if len(items) == 1:
-        relation = "SINGLE"
-    elif "COMPENSATION_PARTIAL" in classes:
-        relation = "CORRECTION"
-    elif target == "16S" and {
-        "PANEL_OXA48_VIM",
-        "PANEL_KPC_NDM",
+        relation = ResultRelations.single
+    elif RunClasses.compensation_partial in classes:
+        relation = ResultRelations.correction
+    elif target == PCRTargets.control_16s and {
+        RunClasses.panel_oxa48_vim,
+        RunClasses.panel_kpc_ndm,
     }.issubset(classes):
-        relation = "PANEL_COMPLEMENT"
+        relation = ResultRelations.panel_complement
     else:
-        relation = "HISTORICAL_REPEAT"
+        relation = ResultRelations.historical_repeat
     tie = bool(
         len(valid) > 1
         and valid[0]["started"] is not None
@@ -760,9 +811,13 @@ def _summarize_results(
         "preferred": valid[0]["id"] if valid else None,
         "relation": relation,
         "concordance": (
-            "NO_VALID_RESULT"
+            ConcordanceLevels.no_valid_result
             if not valid
-            else ("CONCORDANT" if len(calls) <= 1 else "DISCORDANT")
+            else (
+                ConcordanceLevels.concordant
+                if len(calls) <= 1
+                else ConcordanceLevels.discordant
+            )
         ),
         "needs_review": not valid or len(calls) > 1 or tie,
         "tie": tie,
@@ -833,13 +888,14 @@ def _start_derivation(
             """
             INSERT INTO pcr_derivation_run (
                 algorithm_version, rule_version, parameters_json, status
-            ) VALUES (:algorithm_version, :rule_version, :parameters, 'RUNNING')
+            ) VALUES (:algorithm_version, :rule_version, :parameters, :status)
             """
         ),
         {
             "algorithm_version": algorithm_version,
             "rule_version": RULE_VERSION,
             "parameters": _json(params.as_dict()),
+            "status": DerivationStatuses.running,
         },
     )
     return int(result.lastrowid)

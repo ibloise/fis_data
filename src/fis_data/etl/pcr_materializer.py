@@ -13,6 +13,12 @@ from sqlalchemy.engine import Connection, Engine
 from .contracts import JobContext
 from .excel_profiles import normalize_profile_token
 from .materialization import MaterializationRow, MaterializationStats
+from .pcr_enums import (
+    MaterializationStatuses,
+    PCRAxisKinds,
+    PCRMeasurementKinds,
+    PCRSheetKinds,
+)
 
 
 class PCRMaterializer:
@@ -53,7 +59,7 @@ class PCRMaterializer:
                         ctx=ctx,
                         row=row,
                         materializer=self,
-                        status="LOAD_ERROR",
+                        status=MaterializationStatuses.load_error,
                         error=error,
                     )
                 if reprocess:
@@ -63,7 +69,7 @@ class PCRMaterializer:
                 return MaterializationStats(
                     file_id=ctx.file_id,
                     entity_name=ctx.entity_name,
-                    status="LOAD_ERROR",
+                    status=MaterializationStatuses.load_error,
                     rows_seen=len(rows),
                     rows_loaded=0,
                     rows_error=len(rows),
@@ -100,7 +106,7 @@ class PCRMaterializer:
                                 ctx=ctx,
                                 row=row,
                                 materializer=self,
-                                status="LOADED",
+                                status=MaterializationStatuses.loaded,
                                 target=target,
                             )
                         loaded += 1
@@ -111,7 +117,7 @@ class PCRMaterializer:
                             ctx=ctx,
                             row=row,
                             materializer=self,
-                            status="LOAD_ERROR",
+                            status=MaterializationStatuses.load_error,
                             error=str(exc),
                         )
                         errors += 1
@@ -126,7 +132,11 @@ class PCRMaterializer:
         return MaterializationStats(
             file_id=ctx.file_id,
             entity_name=ctx.entity_name,
-            status="LOADED_WITH_ERRORS" if errors else "LOADED",
+            status=(
+                MaterializationStatuses.loaded_with_errors
+                if errors
+                else MaterializationStatuses.loaded
+            ),
             rows_seen=len(rows),
             rows_loaded=loaded,
             rows_error=errors,
@@ -137,7 +147,7 @@ class PCRMaterializer:
 
 def _run_name(rows: Iterable[MaterializationRow]) -> str | None:
     for row in rows:
-        if row.payload.get("sheet_kind") != "run_information":
+        if row.payload.get("sheet_kind") != PCRSheetKinds.run_information:
             continue
         fields = row.payload.get("fields", {})
         if normalize_profile_token(str(fields.get("key", ""))) != "file_name":
@@ -205,16 +215,14 @@ def _materialize_row(
     if not isinstance(fields, dict):
         raise ValueError("Payload fields must be an object.")
 
-    if sheet_kind == "run_information":
+    if sheet_kind == PCRSheetKinds.run_information:
         return _materialize_attribute(conn, ctx, row, pcr_run_id, fields)
-    if sheet_kind == "cq_results":
-        return _materialize_cq(
-            conn, ctx, row, pcr_run_id, fields, well_ids=well_ids
-        )
+    if sheet_kind == PCRSheetKinds.cq_results:
+        return _materialize_cq(conn, ctx, row, pcr_run_id, fields, well_ids=well_ids)
     if sheet_kind in {
-        "amplification_sybr",
-        "melt_curve_sybr",
-        "melt_curve_derivative_sybr",
+        PCRSheetKinds.amplification_sybr,
+        PCRSheetKinds.melt_curve_sybr,
+        PCRSheetKinds.melt_curve_derivative_sybr,
     }:
         return _materialize_rfu(
             conn,
@@ -479,15 +487,21 @@ def _materialize_rfu(
     fields: dict[str, Any],
     well_ids: dict[str, int],
 ) -> dict[str, Any]:
-    if sheet_kind == "amplification_sybr":
-        axis_kind, axis_value = "cycle", fields["cycle"]
-        measurement_kind = "amplification_rfu"
-    elif sheet_kind == "melt_curve_sybr":
-        axis_kind, axis_value = "temperature", fields["temperature"]
-        measurement_kind = "melt_curve_rfu"
+    if sheet_kind == PCRSheetKinds.amplification_sybr:
+        axis_kind, axis_value = PCRAxisKinds.cycle, fields[PCRAxisKinds.cycle]
+        measurement_kind = PCRMeasurementKinds.amplification_rfu
+    elif sheet_kind == PCRSheetKinds.melt_curve_sybr:
+        axis_kind, axis_value = (
+            PCRAxisKinds.temperature,
+            fields[PCRAxisKinds.temperature],
+        )
+        measurement_kind = PCRMeasurementKinds.melt_curve_rfu
     else:
-        axis_kind, axis_value = "temperature", fields["temperature"]
-        measurement_kind = "melt_curve_derivative"
+        axis_kind, axis_value = (
+            PCRAxisKinds.temperature,
+            fields[PCRAxisKinds.temperature],
+        )
+        measurement_kind = PCRMeasurementKinds.melt_curve_derivative
 
     rfu_by_well = fields.get("rfu_by_well")
     if not isinstance(rfu_by_well, dict) or not rfu_by_well:
