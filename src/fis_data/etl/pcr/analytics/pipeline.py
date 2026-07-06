@@ -26,13 +26,13 @@ from .domain import (
     aggregate_run_qc,
     classify_run,
     classify_sample_name,
+    episode_components,
     episode_date_key,
     evaluate_target_qc,
     group_result_candidates,
     is_real_sample,
     overlap,
     parse_cfx_datetime,
-    run_components,
     sample_key,
     summarize_results,
 )
@@ -268,49 +268,47 @@ class PCRAnalyticsPipeline:
             for override in manual_overrides
             for run_id in override.payload.get("run_ids", [])
         }
-        by_date: dict[str | None, list[tuple[int, str]]] = defaultdict(list)
+        candidates: list[tuple[int, str, str | None]] = []
         for run_id, run_class, date_key in run_rows:
             if run_id in manual_run_ids:
                 continue
-            by_date[date_key].append((run_id, run_class))
+            candidates.append((run_id, run_class, date_key))
 
         episode_count = 0
-        for date_key, candidates in by_date.items():
-            components = (
-                run_components(candidates, samples)
-                if date_key
-                else [[candidate] for candidate in candidates]
+        for position, component in enumerate(
+            episode_components(candidates, samples), start=1
+        ):
+            component_date = _component_date_key(component)
+            component_runs = [(run_id, run_class) for run_id, run_class, _ in component]
+            status = _episode_association_status(component_runs)
+            review = (
+                None
+                if status == EpisodeAssociationStatuses.automatic
+                else "No unambiguous run partner."
             )
-            for position, component in enumerate(components, start=1):
-                status = _episode_association_status(component, date_key)
-                review = (
-                    None
-                    if status == EpisodeAssociationStatuses.automatic
-                    else "No unambiguous run partner."
-                )
-                memberships = []
-                for run_id, run_class in component:
-                    scores = [
-                        overlap(samples[run_id], samples[other_id])
-                        for other_id, _ in component
-                        if other_id != run_id
-                    ]
-                    memberships.append(
-                        EpisodeMembership(
-                            run_id=run_id,
-                            role=run_class,
-                            score=max(scores) if scores else None,
-                        )
+            memberships = []
+            for run_id, run_class in component_runs:
+                scores = [
+                    overlap(samples[run_id], samples[other_id])
+                    for other_id, _ in component_runs
+                    if other_id != run_id
+                ]
+                memberships.append(
+                    EpisodeMembership(
+                        run_id=run_id,
+                        role=run_class,
+                        score=max(scores) if scores else None,
                     )
-                self.repository.insert_episode(
-                    derivation_id=derivation_id,
-                    episode_key=f"{date_key or 'UNPARSED'}:{position:02d}",
-                    date_key=date_key,
-                    status=status,
-                    review=review,
-                    memberships=memberships,
                 )
-                episode_count += 1
+            self.repository.insert_episode(
+                derivation_id=derivation_id,
+                episode_key=f"{_component_key_prefix(component)}:{position:02d}",
+                date_key=component_date,
+                status=status,
+                review=review,
+                memberships=memberships,
+            )
+            episode_count += 1
         for override in manual_overrides:
             run_ids = [
                 int(run_id)
@@ -396,17 +394,35 @@ class PCRAnalyticsPipeline:
         return self.overrides.get((item_type, subject_key))
 
 
-def _episode_association_status(
-    component: list[tuple[int, str]], date_key: str | None
-) -> str:
+def _episode_association_status(component: list[tuple[int, str]]) -> str:
     """Decide whether a run component is a complete episode or needs review."""
 
     run_classes = {run_class for _, run_class in component}
     if run_classes == {RunClasses.screening}:
         return EpisodeAssociationStatuses.automatic
-    if date_key and len(component) > 1:
+    if len(component) > 1:
         return EpisodeAssociationStatuses.automatic
     return EpisodeAssociationStatuses.review
+
+
+def _component_date_key(component: list[tuple[int, str, str | None]]) -> str | None:
+    """Return the shared episode date only when every run has the same one."""
+
+    dates = {date_key for _, _, date_key in component if date_key}
+    if len(dates) == 1 and all(date_key for _, _, date_key in component):
+        return next(iter(dates))
+    return None
+
+
+def _component_key_prefix(component: list[tuple[int, str, str | None]]) -> str:
+    """Return a stable episode key prefix for dated, mixed or undated groups."""
+
+    dates = {date_key for _, _, date_key in component if date_key}
+    if len(dates) == 1 and all(date_key for _, _, date_key in component):
+        return next(iter(dates))
+    if dates:
+        return "MIXED"
+    return "UNPARSED"
 
 
 def _interpretation_records(

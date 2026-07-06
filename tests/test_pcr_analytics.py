@@ -118,6 +118,69 @@ def test_screening_run_is_never_paired_in_episode_association() -> None:
     assert {member.run_id for member in panel_episode["memberships"]} == {2, 3}
 
 
+def test_full_overlap_panel_runs_pair_across_different_dates() -> None:
+    repository = Mock(spec=PCRAnalyticsRepository)
+    repository.fetch_episode_inputs.return_value = (
+        [
+            (1, "PANEL_KPC_NDM", "2024-01-01"),
+            (2, "PANEL_OXA48_VIM", "2024-01-02"),
+        ],
+        {1: {101, 102}, 2: {101, 102}},
+    )
+    pipeline = PCRAnalyticsPipeline(repository)
+
+    assert pipeline.associate_episodes(7) == 1
+
+    episode = repository.insert_episode.call_args.kwargs
+    assert episode["episode_key"] == "MIXED:01"
+    assert episode["date_key"] is None
+    assert episode["status"] == "AUTO"
+    assert episode["review"] is None
+    assert {member.run_id for member in episode["memberships"]} == {1, 2}
+
+
+def test_full_overlap_compensation_pairs_across_different_dates() -> None:
+    repository = Mock(spec=PCRAnalyticsRepository)
+    repository.fetch_episode_inputs.return_value = (
+        [
+            (1, "PANEL_OXA48_VIM", "2024-01-01"),
+            (2, "COMPENSATION_PARTIAL", "2024-01-02"),
+        ],
+        {1: {101, 102}, 2: {101, 102}},
+    )
+    pipeline = PCRAnalyticsPipeline(repository)
+
+    assert pipeline.associate_episodes(7) == 1
+
+    episode = repository.insert_episode.call_args.kwargs
+    assert episode["episode_key"] == "MIXED:01"
+    assert episode["date_key"] is None
+    assert episode["status"] == "AUTO"
+    assert episode["review"] is None
+    assert {member.run_id for member in episode["memberships"]} == {1, 2}
+
+
+def test_partial_overlap_panel_runs_do_not_pair_across_different_dates() -> None:
+    repository = Mock(spec=PCRAnalyticsRepository)
+    repository.fetch_episode_inputs.return_value = (
+        [
+            (1, "PANEL_KPC_NDM", "2024-01-01"),
+            (2, "PANEL_OXA48_VIM", "2024-01-02"),
+        ],
+        {1: {101, 102, 103}, 2: {101, 102, 104}},
+    )
+    pipeline = PCRAnalyticsPipeline(repository)
+
+    assert pipeline.associate_episodes(7) == 2
+
+    episodes = [call.kwargs for call in repository.insert_episode.call_args_list]
+    assert [episode["status"] for episode in episodes] == ["REVIEW", "REVIEW"]
+    memberships = [
+        {member.run_id for member in episode["memberships"]} for episode in episodes
+    ]
+    assert memberships == [{1}, {2}]
+
+
 def test_typed_result_selection_prefers_latest_valid_candidate() -> None:
     candidates = [
         ResultCandidate(

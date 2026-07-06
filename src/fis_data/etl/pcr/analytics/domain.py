@@ -33,6 +33,11 @@ CARBAPENEMASE_TARGETS = {
     PCRTargets.kpc,
     PCRTargets.ndm,
 }
+EPISODE_FULL_OVERLAP_CLASSES = {
+    RunClasses.compensation_partial,
+    RunClasses.panel_oxa48_vim,
+    RunClasses.panel_kpc_ndm,
+}
 
 
 def classify_sample_name(
@@ -154,6 +159,71 @@ def run_components(
             [(run_id, classes[run_id]) for run_id in sorted(component_ids)]
         )
     return components
+
+
+def episode_components(
+    candidates: list[tuple[int, str, str | None]], samples: dict[int, set[int]]
+) -> list[list[tuple[int, str, str | None]]]:
+    """Build episode run groups using date matches or full sample overlap."""
+
+    remaining = {run_id for run_id, _, _ in candidates}
+    rows = {run_id: (run_class, date_key) for run_id, run_class, date_key in candidates}
+    components = []
+    while remaining:
+        first = min(remaining)
+        remaining.remove(first)
+        pending = [first]
+        component_ids = set(pending)
+        while pending:
+            current = pending.pop()
+            current_class, current_date = rows[current]
+            if current_class == RunClasses.screening:
+                continue
+            linked = {
+                other
+                for other in remaining
+                if _episode_runs_link(
+                    current_class=current_class,
+                    current_date=current_date,
+                    current_samples=samples[current],
+                    other_class=rows[other][0],
+                    other_date=rows[other][1],
+                    other_samples=samples[other],
+                )
+            }
+            remaining -= linked
+            pending.extend(linked)
+            component_ids |= linked
+        components.append(
+            [
+                (run_id, rows[run_id][0], rows[run_id][1])
+                for run_id in sorted(component_ids)
+            ]
+        )
+    return components
+
+
+def _episode_runs_link(
+    *,
+    current_class: str,
+    current_date: str | None,
+    current_samples: set[int],
+    other_class: str,
+    other_date: str | None,
+    other_samples: set[int],
+) -> bool:
+    """Return whether two non-screening runs belong to one episode."""
+
+    if current_class == RunClasses.screening or other_class == RunClasses.screening:
+        return False
+    sample_overlap = overlap(current_samples, other_samples)
+    if (
+        sample_overlap == 1.0
+        and current_class in EPISODE_FULL_OVERLAP_CLASSES
+        and other_class in EPISODE_FULL_OVERLAP_CLASSES
+    ):
+        return True
+    return bool(current_date and current_date == other_date and sample_overlap >= 0.8)
 
 
 def overlap(left: set[int], right: set[int]) -> float:
