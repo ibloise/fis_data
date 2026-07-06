@@ -291,8 +291,15 @@ class PCRAnalyticsRepository:
                     """
                     SELECT interpretation.pcr_run_id,
                            interpretation.canonical_target,
-                           classification.well_role, interpretation.call
+                           interpretation.source_target,
+                           analysis.run_class,
+                           classification.well_role,
+                           interpretation.call,
+                           interpretation.cq
                     FROM pcr_interpretation AS interpretation
+                    JOIN pcr_run_analysis AS analysis
+                      ON analysis.derivation_id = interpretation.derivation_id
+                     AND analysis.pcr_run_id = interpretation.pcr_run_id
                     JOIN pcr_well_classification AS classification
                       ON classification.derivation_id = interpretation.derivation_id
                      AND classification.pcr_well_id = interpretation.pcr_well_id
@@ -302,7 +309,15 @@ class PCRAnalyticsRepository:
                 {"derivation_id": derivation_id},
             ).all()
         return [
-            QCObservation(int(row[0]), str(row[1]), str(row[2]), str(row[3]))
+            QCObservation(
+                run_id=int(row[0]),
+                target=str(row[1]),
+                source_target=str(row[2]),
+                run_class=str(row[3]),
+                role=str(row[4]),
+                call=str(row[5]),
+                cq=float(row[6]) if row[6] is not None else None,
+            )
             for row in rows
         ]
 

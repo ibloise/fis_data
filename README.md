@@ -102,6 +102,11 @@ minimum temperature of `70`, a raw derivative RFU threshold of `100`, Cq limits
 NDM (`86`), and KPC (`88`). Screening curves can produce multiple target calls;
 specific assays select one best peak for their canonical target.
 
+QC is target-specific for panel assays. For Screening assays, the positive
+control is evaluated as a Screening control: its Cq must be `>5` and `<40`, and
+melting QC passes when at least one of OXA48, VIM, NDM, or KPC is positive. The
+working melting target is recorded in PCR QC details.
+
 Current analytical results are exposed through `v_pcr_current_result`,
 `v_pcr_result_history`, `v_pcr_run_qc`, `v_pcr_episodes`, and
 `v_pcr_review_queue`.

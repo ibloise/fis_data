@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, replace
 from datetime import date
 from typing import Any
@@ -72,6 +73,58 @@ class PCRReviewService:
             "commands": _command_hints(current),
             "history": [asdict(action) for action in history],
             "active_override": asdict(active) if active else None,
+        }
+
+    def summary(self) -> dict[str, Any]:
+        """Summarize current PCR review workload and active decisions."""
+
+        derivation_id = self.repository.current_derivation_id()
+        actions = self.repository.all_actions()
+        states = _review_states(actions)
+        active_overrides = self.repository.active_overrides()
+        by_type = {
+            member.value: {
+                "item_type": member.value,
+                "total": 0,
+                "open": 0,
+                "resolved": 0,
+            }
+            for member in ReviewItemType
+        }
+        reason_counts: Counter[tuple[str, str]] = Counter()
+        for item in self.repository.list_current_items():
+            status = states.get(
+                (item.item_type, item.subject_key, item.fingerprint), "OPEN"
+            )
+            bucket = by_type[item.item_type]
+            bucket["total"] += 1
+            bucket[status.lower()] += 1
+            if status == "OPEN":
+                reason_counts[(item.item_type, item.reason)] += 1
+        override_counts: Counter[str] = Counter(
+            override.item_type for override in active_overrides
+        )
+        rows = []
+        for item_type, bucket in by_type.items():
+            rows.append({**bucket, "active_overrides": override_counts[item_type]})
+        rows.sort(key=lambda row: row["item_type"])
+        return {
+            "derivation_id": derivation_id,
+            "totals": {
+                "current_items": sum(row["total"] for row in rows),
+                "open": sum(row["open"] for row in rows),
+                "resolved": sum(row["resolved"] for row in rows),
+                "active_overrides": len(active_overrides),
+                "actions": len(actions),
+            },
+            "by_type": rows,
+            "top_open_reasons": [
+                {"item_type": item_type, "reason": reason, "count": count}
+                for (item_type, reason), count in sorted(
+                    reason_counts.items(),
+                    key=lambda entry: (-entry[1], entry[0][0], entry[0][1]),
+                )[:10]
+            ],
         }
 
     def resolve(

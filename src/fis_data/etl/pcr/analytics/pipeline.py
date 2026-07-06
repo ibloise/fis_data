@@ -28,6 +28,7 @@ from .domain import (
     classify_sample_name,
     episode_components,
     episode_date_key,
+    evaluate_screening_target_qc,
     evaluate_target_qc,
     group_result_candidates,
     is_real_sample,
@@ -40,6 +41,7 @@ from .models import (
     CQResult,
     EpisodeMembership,
     InterpretationInsert,
+    QCObservation,
     ResultSelection,
     RunAnalysis,
     RunQC,
@@ -201,18 +203,24 @@ class PCRAnalyticsPipeline:
     def evaluate_qc(self, derivation_id: int) -> int:
         """Evaluate control calls and persist target and run QC summaries."""
 
-        grouped: dict[tuple[int, str], dict[str, list[str]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
+        grouped: dict[tuple[int, str], list[QCObservation]] = defaultdict(list)
+        by_run: dict[int, list[QCObservation]] = defaultdict(list)
         for observation in self.repository.fetch_qc_observations(derivation_id):
-            grouped[(observation.run_id, observation.target)][observation.role].append(
-                observation.call
-            )
+            grouped[(observation.run_id, observation.target)].append(observation)
+            by_run[observation.run_id].append(observation)
 
         targets: list[TargetQC] = []
-        by_run: dict[int, list[TargetQCAssessment]] = defaultdict(list)
-        for (run_id, target), roles in grouped.items():
-            assessment = evaluate_target_qc(roles)
+        qc_by_run: dict[int, list[TargetQCAssessment]] = defaultdict(list)
+        for (run_id, target), observations in grouped.items():
+            roles: dict[str, list[str]] = defaultdict(list)
+            for observation in observations:
+                roles[observation.role].append(observation.call)
+            run_class = observations[0].run_class
+            assessment = (
+                evaluate_screening_target_qc(by_run[run_id])
+                if run_class == RunClasses.screening
+                else evaluate_target_qc(roles)
+            )
             qc_override = self._override(
                 ReviewItemType.target_qc,
                 f"run:{run_id}:target:{target}",
@@ -223,6 +231,11 @@ class PCRAnalyticsPipeline:
                     status=str(qc_override.payload["status"]),
                     valid=bool(qc_override.payload["valid"]),
                 )
+            details = {
+                "failures": assessment.failures,
+                "roles": roles,
+                **assessment.details,
+            }
             item = TargetQC(
                 derivation_id=derivation_id,
                 run_id=run_id,
@@ -232,12 +245,12 @@ class PCRAnalyticsPipeline:
                 positive=assessment.positive,
                 negative=assessment.negative,
                 warnings=_json(assessment.warnings),
-                details=_json({"failures": assessment.failures, "roles": roles}),
+                details=_json(details),
             )
             targets.append(item)
-            by_run[run_id].append(assessment)
+            qc_by_run[run_id].append(assessment)
         runs = []
-        for run_id, assessments in by_run.items():
+        for run_id, assessments in qc_by_run.items():
             aggregate = aggregate_run_qc(assessments)
             runs.append(
                 RunQC(

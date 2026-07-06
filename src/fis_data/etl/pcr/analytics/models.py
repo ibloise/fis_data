@@ -97,8 +97,11 @@ class QCObservation:
 
     run_id: int
     target: str
+    source_target: str
+    run_class: str
     role: str
     call: str
+    cq: float | None
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,7 @@ class TargetQCAssessment:
     negative: int
     warnings: tuple[str, ...]
     failures: tuple[str, ...]
+    details: dict[str, object]
 
 
 @dataclass(frozen=True)

@@ -94,6 +94,21 @@ def show_item(
     _show_table(payload)
 
 
+@pcr_review.command("summary")
+@click.option(
+    "--format", "output_format", type=click.Choice(["table", "json"]), default="table"
+)
+@click.pass_obj
+def review_summary(obj: dict[str, Any], output_format: str) -> None:
+    """Summarize current review workload by type and state."""
+
+    payload = _call(obj["service"].summary)
+    if output_format == "json":
+        _json_output(payload)
+        return
+    _summary_table(payload)
+
+
 def _review_options(function):
     options = [
         click.option("--reviewer", required=True),
@@ -265,6 +280,30 @@ def _call(function, **kwargs: Any):
 
 def _json_output(value: Any) -> None:
     click.echo(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+
+
+def _summary_table(payload: dict[str, Any]) -> None:
+    totals = payload["totals"]
+    click.echo(f"DERIVATION_ID: {payload['derivation_id']}")
+    click.echo(
+        "TOTAL\tOPEN\tRESOLVED\tACTIVE_OVERRIDES\tACTIONS"
+    )
+    click.echo(
+        f"{totals['current_items']}\t{totals['open']}\t{totals['resolved']}\t"
+        f"{totals['active_overrides']}\t{totals['actions']}"
+    )
+    click.echo("")
+    click.echo("TYPE\tTOTAL\tOPEN\tRESOLVED\tACTIVE_OVERRIDES")
+    for row in payload["by_type"]:
+        click.echo(
+            f"{row['item_type']}\t{row['total']}\t{row['open']}\t"
+            f"{row['resolved']}\t{row['active_overrides']}"
+        )
+    click.echo("")
+    click.echo("TOP_OPEN_REASONS")
+    click.echo("TYPE\tCOUNT\tREASON")
+    for row in payload["top_open_reasons"]:
+        click.echo(f"{row['item_type']}\t{row['count']}\t{row['reason']}")
 
 
 def _show_table(payload: dict[str, Any]) -> None:

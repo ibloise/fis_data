@@ -113,6 +113,13 @@ Una combinación run-target entra en cola cuando falla el control positivo,
 falla el control negativo o falta alguno de ellos. El `reason` es el JSON de
 detalles de QC, con contadores y listas de advertencias o fallos.
 
+En paneles, el QC del control positivo es específico de target. En runs
+`SCREENING`, el control positivo se evalúa como control del ensayo Screening:
+el Cq debe ser `>5` y `<40`, y la validación de melting pasa si al menos una de
+las cuatro dianas (`OXA48`, `VIM`, `NDM`, `KPC`) es positiva. Cuando esto ocurre,
+`details_json` incluye `screening_qc: true`, `working_targets` y
+`working_target` para dejar trazabilidad de la diana que hizo válido el control.
+
 Issues posibles en el payload de QC:
 
 - `MISSING_POSITIVE_CONTROL`
@@ -157,6 +164,30 @@ Si se omite `--db-path`, se usa la configuración habitual de `FIS_DB_URL` o
 `FIS_DB_PATH`. La herramienta crea la tabla de auditoría si todavía no existe,
 pero necesita al menos una derivación PCR con estado `SUCCESS` para listar o
 modificar incidencias.
+
+## Resumir necesidades de revisión
+
+`summary` muestra el estado global de la cola actual sin listar cada elemento:
+
+```bash
+fis-data pcr-review --db-path var/fis_data.sqlite summary
+```
+
+La salida incluye:
+
+- derivación analítica actual;
+- total de incidencias actuales;
+- abiertas y resueltas;
+- overrides activos;
+- acciones auditables acumuladas;
+- desglose por tipo (`WELL`, `RUN`, `EPISODE`, `TARGET_QC`, `RESULT`);
+- motivos abiertos más frecuentes.
+
+Para scripts o seguimiento periódico:
+
+```bash
+fis-data pcr-review --db-path var/fis_data.sqlite summary --format json
+```
 
 ## Listar la cola
 

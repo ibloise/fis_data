@@ -19,6 +19,7 @@ from ..enums import (
     WellRoles,
 )
 from .models import (
+    QCObservation,
     ResultCandidate,
     ResultSummary,
     RunQCAssessment,
@@ -317,6 +318,75 @@ def evaluate_target_qc(roles: dict[str, list[str]]) -> TargetQCAssessment:
         negative=len(negative),
         warnings=tuple(warnings),
         failures=tuple(failures),
+        details={},
+    )
+
+
+def evaluate_screening_target_qc(
+    observations: list[QCObservation],
+    *,
+    cq_lower_limit: float = 5,
+    cq_upper_limit: float = 40,
+) -> TargetQCAssessment:
+    """Evaluate Screening controls at source-target level for derived targets."""
+
+    positive = [
+        item
+        for item in observations
+        if item.role == WellRoles.positive_control
+        and item.source_target == PCRTargets.screening
+    ]
+    negative = [
+        item
+        for item in observations
+        if item.role == WellRoles.negative_control
+        and item.source_target == PCRTargets.screening
+    ]
+    warnings = []
+    failures = []
+    if not positive:
+        warnings.append(QCIssues.missing_positive_control)
+    if not negative:
+        warnings.append(QCIssues.missing_negative_control)
+    positive_with_valid_cq = [
+        item
+        for item in positive
+        if item.cq is not None and cq_lower_limit < item.cq < cq_upper_limit
+    ]
+    working_targets = sorted(
+        {
+            item.target
+            for item in positive_with_valid_cq
+            if item.call == ResultLevels.positive
+        }
+    )
+    if positive and not positive_with_valid_cq:
+        failures.append(QCIssues.positive_control_not_positive)
+    elif positive and not working_targets:
+        failures.append(QCIssues.positive_control_not_positive)
+    if any(item.call == ResultLevels.positive for item in negative):
+        failures.append(QCIssues.negative_control_positive)
+    if any(item.call == ResultLevels.indeterminate for item in negative):
+        warnings.append(QCIssues.negative_control_indeterminate)
+    return TargetQCAssessment(
+        status=(
+            QCStatuses.invalid
+            if failures
+            else (QCStatuses.warning if warnings else QCStatuses.valid)
+        ),
+        valid=not failures,
+        positive=len({item.cq for item in positive if item.cq is not None})
+        or len(positive),
+        negative=len({item.cq for item in negative if item.cq is not None})
+        or len(negative),
+        warnings=tuple(warnings),
+        failures=tuple(failures),
+        details={
+            "screening_qc": True,
+            "positive_control_cq_valid": bool(positive_with_valid_cq),
+            "working_targets": working_targets,
+            "working_target": working_targets[0] if working_targets else None,
+        },
     )
 
 

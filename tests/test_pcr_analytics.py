@@ -7,14 +7,17 @@ from click.testing import CliRunner
 from sqlalchemy import create_engine, insert, text
 
 from fis_data.cli import cli
-from fis_data.etl.pcr.analytics.domain import summarize_results
+from fis_data.etl.pcr.analytics.domain import (
+    evaluate_screening_target_qc,
+    summarize_results,
+)
 from fis_data.etl.pcr.analytics.facade import (
     PCRAnalyticsJob,
     _episode_date_key,
     _run_components,
     _summarize_results,
 )
-from fis_data.etl.pcr.analytics.models import ResultCandidate
+from fis_data.etl.pcr.analytics.models import QCObservation, ResultCandidate
 from fis_data.etl.pcr.analytics.pipeline import PCRAnalyticsPipeline
 from fis_data.etl.pcr.analytics.repository import PCRAnalyticsRepository
 from fis_data.etl.pcr.melting import MeltingParameters, calculate_peaks, interpret_curve
@@ -158,6 +161,47 @@ def test_full_overlap_compensation_pairs_across_different_dates() -> None:
     assert episode["status"] == "AUTO"
     assert episode["review"] is None
     assert {member.run_id for member in episode["memberships"]} == {1, 2}
+
+
+def _screening_qc_observation(
+    target: str, role: str, call: str, cq: float
+) -> QCObservation:
+    return QCObservation(1, target, "Screening", "SCREENING", role, call, cq)
+
+
+def test_screening_qc_accepts_valid_cq_with_one_working_melting_target() -> None:
+    observations = [
+        _screening_qc_observation("KPC", "POSITIVE_CONTROL", "NEGATIVE", 20),
+        _screening_qc_observation("NDM", "POSITIVE_CONTROL", "NEGATIVE", 20),
+        _screening_qc_observation("OXA48", "POSITIVE_CONTROL", "NEGATIVE", 20),
+        _screening_qc_observation("VIM", "POSITIVE_CONTROL", "POSITIVE", 20),
+        _screening_qc_observation("KPC", "NEGATIVE_CONTROL", "NEGATIVE", 25),
+        _screening_qc_observation("NDM", "NEGATIVE_CONTROL", "NEGATIVE", 25),
+        _screening_qc_observation("OXA48", "NEGATIVE_CONTROL", "NEGATIVE", 25),
+        _screening_qc_observation("VIM", "NEGATIVE_CONTROL", "NEGATIVE", 25),
+    ]
+
+    assessment = evaluate_screening_target_qc(observations)
+
+    assert assessment.valid
+    assert assessment.status == "VALID"
+    assert assessment.failures == ()
+    assert assessment.details["working_target"] == "VIM"
+    assert assessment.details["working_targets"] == ["VIM"]
+
+
+def test_screening_qc_rejects_positive_control_cq_outside_range() -> None:
+    observations = [
+        _screening_qc_observation("VIM", "POSITIVE_CONTROL", "POSITIVE", 41),
+        _screening_qc_observation("VIM", "NEGATIVE_CONTROL", "NEGATIVE", 25),
+    ]
+
+    assessment = evaluate_screening_target_qc(observations)
+
+    assert not assessment.valid
+    assert assessment.status == "INVALID"
+    assert assessment.failures == ("POSITIVE_CONTROL_NOT_POSITIVE",)
+    assert assessment.details["positive_control_cq_valid"] is False
 
 
 def test_partial_overlap_panel_runs_do_not_pair_across_different_dates() -> None:

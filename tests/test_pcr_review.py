@@ -274,6 +274,45 @@ def test_changed_issue_fingerprint_reappears_as_open(tmp_path) -> None:
     assert changed[0].fingerprint != item.fingerprint
 
 
+def test_review_summary_counts_statuses_and_overrides(tmp_path) -> None:
+    engine, _ = _review_engine(tmp_path)
+    service = PCRReviewService(PCRReviewRepository(engine))
+    items = {item.item_type: item for item in service.list_items(limit=20)}
+    service.resolve(
+        item_type=items["RESULT"].item_type,
+        subject_key=items["RESULT"].subject_key,
+        fingerprint=items["RESULT"].fingerprint,
+        derivation_id=items["RESULT"].derivation_id,
+        resolution="ACCEPTED",
+        reason="Reviewed",
+        reviewer="tester",
+    )
+    service.override_well(
+        subject_key=items["WELL"].subject_key,
+        fingerprint=items["WELL"].fingerprint,
+        derivation_id=items["WELL"].derivation_id,
+        role="REAL_SAMPLE",
+        sample_key="S1",
+        reason="Known sample",
+        reviewer="tester",
+    )
+
+    summary = service.summary()
+
+    assert summary["totals"] == {
+        "current_items": 5,
+        "open": 3,
+        "resolved": 2,
+        "active_overrides": 1,
+        "actions": 2,
+    }
+    by_type = {row["item_type"]: row for row in summary["by_type"]}
+    assert by_type["WELL"]["resolved"] == 1
+    assert by_type["WELL"]["active_overrides"] == 1
+    assert by_type["RESULT"]["resolved"] == 1
+    assert summary["top_open_reasons"][0]["count"] >= 1
+
+
 def test_run_override_is_consumed_by_analytics_pipeline() -> None:
     repository = Mock(spec=PCRAnalyticsRepository)
     repository.fetch_runs.return_value = [
@@ -414,3 +453,33 @@ def test_review_cli_show_explains_episode_actions(tmp_path) -> None:
     assert payload["diagnosis"]["candidate_count"] == 0
     assert "candidate_actions" in payload
     assert "commands" in payload
+
+
+def test_review_cli_summary_outputs_stable_json(tmp_path) -> None:
+    _, db_path = _review_engine(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "pcr-review",
+            "--db-path",
+            str(db_path),
+            "summary",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["derivation_id"] == 1
+    assert payload["totals"]["current_items"] == 5
+    assert {row["item_type"] for row in payload["by_type"]} == {
+        "EPISODE",
+        "RESULT",
+        "RUN",
+        "TARGET_QC",
+        "WELL",
+    }
+    assert payload["top_open_reasons"]
