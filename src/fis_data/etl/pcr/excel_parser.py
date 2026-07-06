@@ -6,9 +6,9 @@ import json
 import re
 from typing import Any
 
-from .excel_profiles import ExcelEntityParser, FileProfile, SheetProfile
-from .pcr_enums import PCRAxisKinds, PCRFileKinds, PCRSheetKinds, PCRSheetPatterns
-from .types import ExcelParseStatus, ParsedExcelRowUpdate, RawExcelRow
+from ..excel_profiles import ExcelEntityParser, FileProfile, SheetProfile
+from ..types import ExcelParseStatus, ParsedExcelRowUpdate, RawExcelRow
+from .enums import PCRAxisKinds, PCRFileKinds, PCRSheetKinds, PCRSheetPatterns
 
 PCR_QUANTIFICATION_CQ_COLUMNS = {
     "well": ("well", "well position", "position"),

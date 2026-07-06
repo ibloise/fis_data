@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import Mock
 
 from click.testing import CliRunner
 from sqlalchemy import create_engine, insert, text
 
 from fis_data.cli import cli
-from fis_data.etl.pcr_analytics import (
+from fis_data.etl.pcr.analytics.domain import summarize_results
+from fis_data.etl.pcr.analytics.facade import (
     PCRAnalyticsJob,
     _episode_date_key,
     _run_components,
     _summarize_results,
 )
-from fis_data.etl.pcr_melting import MeltingParameters, calculate_peaks, interpret_curve
+from fis_data.etl.pcr.analytics.models import ResultCandidate
+from fis_data.etl.pcr.analytics.pipeline import PCRAnalyticsPipeline
+from fis_data.etl.pcr.analytics.repository import PCRAnalyticsRepository
+from fis_data.etl.pcr.melting import MeltingParameters, calculate_peaks, interpret_curve
 from fis_data.schema import (
     create_schema,
     ctl_etl_run,
@@ -29,9 +34,7 @@ from fis_data.schema import (
 def test_melting_handles_zero_curve_and_screening_multimodal() -> None:
     params = MeltingParameters()
     assert (
-        calculate_peaks(
-            temperatures=[78, 79, 80], derivatives=[0, 0, 0], params=params
-        )
+        calculate_peaks(temperatures=[78, 79, 80], derivatives=[0, 0, 0], params=params)
         == []
     )
 
@@ -86,6 +89,62 @@ def test_episode_pairing_and_latest_valid_result_rules() -> None:
     assert summary["preferred"] == 1
     assert summary["relation"] == "CORRECTION"
     assert summary["concordance"] == "CONCORDANT"
+
+
+def test_typed_result_selection_prefers_latest_valid_candidate() -> None:
+    candidates = [
+        ResultCandidate(
+            interpretation_id=1,
+            sample_id=7,
+            target="KPC",
+            call="POSITIVE",
+            run_id=1,
+            started="2024-01-01 10:00:00",
+            run_class="PANEL_KPC_NDM",
+            valid=True,
+        ),
+        ResultCandidate(
+            interpretation_id=2,
+            sample_id=7,
+            target="KPC",
+            call="POSITIVE",
+            run_id=2,
+            started="2024-01-02 10:00:00",
+            run_class="PANEL_KPC_NDM",
+            valid=True,
+        ),
+    ]
+
+    summary = summarize_results(candidates, target="KPC")
+
+    assert summary.preferred == 2
+    assert summary.concordance == "CONCORDANT"
+    assert not summary.needs_review
+
+
+def test_analytics_job_is_a_facade_over_injected_collaborators() -> None:
+    repository = Mock(spec=PCRAnalyticsRepository)
+    pipeline = Mock(spec=PCRAnalyticsPipeline)
+    repository.start_derivation.return_value = 42
+    repository.count_review_items.return_value = 3
+    pipeline.classify_wells.return_value = (10, 8)
+    pipeline.interpret.return_value = 9
+    pipeline.evaluate_qc.return_value = 4
+    pipeline.associate_episodes.return_value = 2
+    pipeline.select_results.return_value = 5
+
+    stats = PCRAnalyticsJob(repository=repository, pipeline=pipeline).run(
+        algorithm_version="test-facade",
+        rebuild=True,
+    )
+
+    assert stats.derivation_id == 42
+    assert stats.wells_classified == 10
+    assert stats.result_groups == 5
+    repository.start_derivation.assert_called_once()
+    pipeline.classify_runs.assert_called_once_with(42)
+    repository.finish_derivation.assert_called_once()
+    repository.create_views.assert_called_once_with()
 
 
 def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> None:

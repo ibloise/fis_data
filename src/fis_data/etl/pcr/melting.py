@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from scipy.signal import find_peaks
 
-from .pcr_enums import PCRTargetAliases, PCRTargets, ResultLevels
+from .enums import PCRTargetAliases, PCRTargets, ResultLevels
 
 CANONICAL_TARGET_TEMPERATURES = {
     PCRTargets.oxa48: 79.5,

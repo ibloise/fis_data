@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .excel_profiles import FARMACIA_EXCEL_PARSER, ExcelEntityParser
-from .pcr_excel_parser import PCR_EXCEL_PARSER
+from .pcr.excel_parser import PCR_EXCEL_PARSER
 
 EXCEL_ENTITY_PARSERS = {
     FARMACIA_EXCEL_PARSER.entity_name: FARMACIA_EXCEL_PARSER,

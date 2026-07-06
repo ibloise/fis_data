@@ -5,8 +5,8 @@ from __future__ import annotations
 import glob
 import json
 import sys
-from dataclasses import asdict
 from collections.abc import Iterator
+from dataclasses import asdict
 from pathlib import Path
 from zipfile import is_zipfile
 
@@ -24,7 +24,7 @@ from .etl.ingest_text import ingest_text_file
 from .etl.materialization import MaterializationJob
 from .etl.materialization_registry import get_entity_materializer
 from .etl.microb_parse_job import MicrobParseJob
-from .etl.pcr_analytics import PCRAnalyticsJob
+from .etl.pcr.analytics import PCRAnalyticsJob
 from .schema import create_schema
 
 
