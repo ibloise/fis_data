@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile
 
-from sqlalchemy import text
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
+
+from ..schema import raw_excel_rows
 
 
 def row_sha256(values: list[Any]) -> str:
@@ -56,17 +58,8 @@ def ingest_excel_file(
     inserted = 0
     total = 0
 
-    insert_stmt = text(
-        """
-        INSERT OR IGNORE INTO raw_excel_rows (
-            source_id, run_id, file_id, entity_name, sheet_name, row_no,
-            raw_values_json, row_sha256, is_header, parse_status
-        )
-        VALUES (
-            :source_id, :run_id, :file_id, :entity_name, :sheet_name, :row_no,
-            :raw_values_json, :row_sha256, :is_header, 'RAW_ONLY'
-        )
-        """
+    insert_stmt = insert(raw_excel_rows).on_conflict_do_nothing(
+        index_elements=["file_id", "sheet_name", "row_no"]
     )
 
     try:
@@ -95,6 +88,7 @@ def ingest_excel_file(
                             ),
                             "row_sha256": row_sha256(values),
                             "is_header": row_no == 1,
+                            "parse_status": "RAW_ONLY",
                         }
                     )
 

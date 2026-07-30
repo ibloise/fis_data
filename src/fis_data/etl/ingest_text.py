@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
+
+from ..schema import raw_text_lines
 
 
 def decode_bytes(data: bytes, encodings: tuple[str, ...] | None = None) -> str:
@@ -68,17 +70,8 @@ def ingest_text_file(
     rows: list[dict[str, object]] = []
     inserted = 0
 
-    insert_stmt = text(
-        """
-        INSERT OR IGNORE INTO raw_text_lines (
-            source_id, run_id, file_id, entity_name, line_no,
-            raw_line, raw_line_sha256, is_header, parse_status
-        )
-        VALUES (
-            :source_id, :run_id, :file_id, :entity_name, :line_no,
-            :raw_line, :raw_line_sha256, :is_header, 'RAW_ONLY'
-        )
-        """
+    insert_stmt = insert(raw_text_lines).on_conflict_do_nothing(
+        index_elements=["file_id", "line_no"]
     )
 
     with engine.begin() as conn:
@@ -93,6 +86,7 @@ def ingest_text_file(
                     "raw_line": raw_line,
                     "raw_line_sha256": line_sha256(raw_line),
                     "is_header": is_probable_header(raw_line),
+                    "parse_status": "RAW_ONLY",
                 }
             )
 

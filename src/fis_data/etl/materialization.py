@@ -7,10 +7,11 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from sqlalchemy import text
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.engine import Engine
 
 from .contracts import JobContext, JobResult
+from ..schema import ctl_materialization_item, raw_excel_rows
 
 log = logging.getLogger(__name__)
 
@@ -77,36 +78,36 @@ class MaterializationRepository:
         file_id: int | None,
         reprocess: bool,
     ) -> list[int]:
-        query = text(
-            """
-            SELECT DISTINCT raw.file_id
-            FROM raw_excel_rows AS raw
-            LEFT JOIN ctl_materialization_item AS item
-              ON item.source_table = 'raw_excel_rows'
-             AND item.source_row_id = raw.row_id
-             AND item.materializer_name = :materializer_name
-            WHERE lower(raw.entity_name) = lower(:entity_name)
-              AND raw.parse_status = 'PARSED_OK'
-              AND (:file_id IS NULL OR raw.file_id = :file_id)
-              AND (
-                    :reprocess = 1
-                    OR item.materialization_item_id IS NULL
-                    OR item.status != 'LOADED'
-                    OR item.materializer_version != :materializer_version
-                  )
-            ORDER BY raw.file_id
-            """
+        raw, item = raw_excel_rows.alias("raw"), ctl_materialization_item.alias("item")
+        pending = or_(
+            item.c.materialization_item_id.is_(None),
+            item.c.status != "LOADED",
+            item.c.materializer_version != materializer_version,
+        )
+        query = (
+            select(raw.c.file_id)
+            .distinct()
+            .select_from(
+                raw.outerjoin(
+                    item,
+                    and_(
+                        item.c.source_table == "raw_excel_rows",
+                        item.c.source_row_id == raw.c.row_id,
+                        item.c.materializer_name == materializer_name,
+                    ),
+                )
+            )
+            .where(
+                func.lower(raw.c.entity_name) == func.lower(entity_name),
+                raw.c.parse_status == "PARSED_OK",
+                *( [raw.c.file_id == file_id] if file_id is not None else [] ),
+                *( [] if reprocess else [pending] ),
+            )
+            .order_by(raw.c.file_id)
         )
         with self.engine.begin() as conn:
             rows = conn.execute(
                 query,
-                {
-                    "entity_name": entity_name,
-                    "materializer_name": materializer_name,
-                    "materializer_version": materializer_version,
-                    "file_id": file_id,
-                    "reprocess": int(reprocess),
-                },
             ).fetchall()
         return [int(row[0]) for row in rows]
 
@@ -119,37 +120,33 @@ class MaterializationRepository:
         materializer_version: str,
         pending_only: bool,
     ) -> list[MaterializationRow]:
-        query = text(
-            """
-            SELECT raw.row_id, raw.source_id, raw.file_id, raw.sheet_name,
-                   raw.row_no, raw.payload_json
-            FROM raw_excel_rows AS raw
-            LEFT JOIN ctl_materialization_item AS item
-              ON item.source_table = 'raw_excel_rows'
-             AND item.source_row_id = raw.row_id
-             AND item.materializer_name = :materializer_name
-            WHERE lower(raw.entity_name) = lower(:entity_name)
-              AND raw.file_id = :file_id
-              AND raw.parse_status = 'PARSED_OK'
-              AND (
-                    :pending_only = 0
-                    OR item.materialization_item_id IS NULL
-                    OR item.status != 'LOADED'
-                    OR item.materializer_version != :materializer_version
-                  )
-            ORDER BY raw.sheet_name, raw.row_no
-            """
+        raw, item = raw_excel_rows.alias("raw"), ctl_materialization_item.alias("item")
+        pending = or_(
+            item.c.materialization_item_id.is_(None),
+            item.c.status != "LOADED",
+            item.c.materializer_version != materializer_version,
+        )
+        query = (
+            select(
+                raw.c.row_id, raw.c.source_id, raw.c.file_id, raw.c.sheet_name,
+                raw.c.row_no, raw.c.payload_json,
+            )
+            .select_from(raw.outerjoin(item, and_(
+                item.c.source_table == "raw_excel_rows",
+                item.c.source_row_id == raw.c.row_id,
+                item.c.materializer_name == materializer_name,
+            )))
+            .where(
+                func.lower(raw.c.entity_name) == func.lower(entity_name),
+                raw.c.file_id == file_id,
+                raw.c.parse_status == "PARSED_OK",
+                *( [pending] if pending_only else [] ),
+            )
+            .order_by(raw.c.sheet_name, raw.c.row_no)
         )
         with self.engine.begin() as conn:
             records = conn.execute(
                 query,
-                {
-                    "entity_name": entity_name,
-                    "file_id": file_id,
-                    "materializer_name": materializer_name,
-                    "materializer_version": materializer_version,
-                    "pending_only": int(pending_only),
-                },
             ).fetchall()
         return [
             MaterializationRow(
@@ -169,15 +166,12 @@ class MaterializationRepository:
         with self.engine.begin() as conn:
             return int(
                 conn.execute(
-                    text(
-                        """
-                        SELECT COUNT(*) FROM raw_excel_rows
-                        WHERE lower(entity_name) = lower(:entity_name)
-                          AND file_id = :file_id
-                          AND parse_status = 'PARSE_ERROR'
-                        """
+                    select(func.count()).select_from(raw_excel_rows).where(
+                        func.lower(raw_excel_rows.c.entity_name)
+                        == func.lower(entity_name),
+                        raw_excel_rows.c.file_id == file_id,
+                        raw_excel_rows.c.parse_status == "PARSE_ERROR",
                     ),
-                    {"entity_name": entity_name, "file_id": file_id},
                 ).scalar_one()
             )
 
@@ -193,22 +187,16 @@ class MaterializationRepository:
         with self.engine.begin() as conn:
             return bool(
                 conn.execute(
-                    text(
-                        """
-                        SELECT EXISTS (
-                            SELECT 1 FROM ctl_materialization_item
-                            WHERE file_id = :file_id
-                              AND materializer_name = :materializer_name
-                              AND status = 'LOADED'
-                              AND materializer_version != :materializer_version
+                    select(
+                        exists().where(
+                            ctl_materialization_item.c.file_id == file_id,
+                            ctl_materialization_item.c.materializer_name
+                            == materializer_name,
+                            ctl_materialization_item.c.status == "LOADED",
+                            ctl_materialization_item.c.materializer_version
+                            != materializer_version,
                         )
-                        """
                     ),
-                    {
-                        "file_id": file_id,
-                        "materializer_name": materializer_name,
-                        "materializer_version": materializer_version,
-                    },
                 ).scalar_one()
             )
 
