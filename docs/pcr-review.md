@@ -53,8 +53,9 @@ permite auditar que la corrección se retiró sin borrar la decisión previa.
 
 ## Necesidades de revisión generadas por analytics
 
-La cola se construye desde la última derivación PCR con estado `SUCCESS`. Cada
-tipo usa una regla concreta para decidir si necesita revisión:
+La cola se construye desde la única derivación PCR marcada con estado `SUCCESS`
+e `is_current = 1`. Cada tipo usa una regla concreta para decidir si necesita
+revisión:
 
 | Tipo | Cuándo entra en revisión | Campo analítico fuente | Qué debe decidir el revisor |
 | --- | --- | --- | --- |
@@ -114,11 +115,10 @@ falla el control negativo o falta alguno de ellos. El `reason` es el JSON de
 detalles de QC, con contadores y listas de advertencias o fallos.
 
 En paneles, el QC del control positivo es específico de target. En runs
-`SCREENING`, el control positivo se evalúa como control del ensayo Screening:
-el Cq debe ser `>5` y `<40`, y la validación de melting pasa si al menos una de
-las cuatro dianas (`OXA48`, `VIM`, `NDM`, `KPC`) es positiva. Cuando esto ocurre,
-`details_json` incluye `screening_qc: true`, `working_targets` y
-`working_target` para dejar trazabilidad de la diana que hizo válido el control.
+`SCREENING`, los controles son globales: al menos una llamada del positivo debe
+ser positiva y todas las llamadas del negativo deben ser negativas.
+`details_json` incluye `screening_qc: true` y los indicadores de ambas
+comprobaciones.
 
 Issues posibles en el payload de QC:
 
