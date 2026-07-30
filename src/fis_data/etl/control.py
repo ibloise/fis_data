@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from sqlalchemy import text
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
+
+from ..schema import ctl_etl_run, ctl_source
 
 
 class RunStatus(StrEnum):
@@ -22,30 +24,18 @@ def ensure_source(engine: Engine, *, source_name: str, source_type: str) -> int:
 
     with engine.begin() as conn:
         existing = conn.execute(
-            text("SELECT source_id FROM ctl_source WHERE source_name = :name"),
-            {"name": source_name},
+            select(ctl_source.c.source_id).where(ctl_source.c.source_name == source_name)
         ).scalar_one_or_none()
         if existing is not None:
             conn.execute(
-                text(
-                    """
-                    UPDATE ctl_source
-                    SET source_type = :source_type
-                    WHERE source_id = :source_id
-                    """
-                ),
-                {"source_type": source_type, "source_id": existing},
+                update(ctl_source)
+                .where(ctl_source.c.source_id == existing)
+                .values(source_type=source_type)
             )
             return int(existing)
 
         result = conn.execute(
-            text(
-                """
-                INSERT INTO ctl_source (source_name, source_type)
-                VALUES (:name, :source_type)
-                """
-            ),
-            {"name": source_name, "source_type": source_type},
+            insert(ctl_source).values(source_name=source_name, source_type=source_type)
         )
         return int(result.lastrowid)
 
@@ -55,13 +45,9 @@ def start_run(engine: Engine, *, pipeline_name: str) -> int:
 
     with engine.begin() as conn:
         result = conn.execute(
-            text(
-                """
-                INSERT INTO ctl_etl_run (pipeline_name, status)
-                VALUES (:pipeline_name, :status)
-                """
-            ),
-            {"pipeline_name": pipeline_name, "status": RunStatus.STARTED.value},
+            insert(ctl_etl_run).values(
+                pipeline_name=pipeline_name, status=RunStatus.STARTED.value
+            )
         )
         return int(result.lastrowid)
 
@@ -77,18 +63,11 @@ def finish_run(
 
     with engine.begin() as conn:
         conn.execute(
-            text(
-                """
-                UPDATE ctl_etl_run
-                SET finished_at = CURRENT_TIMESTAMP,
-                    status = :status,
-                    details_json = :details_json
-                WHERE run_id = :run_id
-                """
-            ),
-            {
-                "status": status.value,
-                "details_json": details_json,
-                "run_id": run_id,
-            },
+            update(ctl_etl_run)
+            .where(ctl_etl_run.c.run_id == run_id)
+            .values(
+                finished_at=func.current_timestamp(),
+                status=status.value,
+                details_json=details_json,
+            )
         )

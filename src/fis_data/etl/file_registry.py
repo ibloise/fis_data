@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Engine
+
+from ..schema import ctl_file_registry
 
 
 def sha256_file(path: Path) -> str:
@@ -34,56 +36,33 @@ def register_file(
 
     with engine.begin() as conn:
         existing = conn.execute(
-            text(
-                """
-                SELECT file_id
-                FROM ctl_file_registry
-                WHERE source_name = :source_name
-                  AND sha256 = :sha256
-                """
-            ),
-            {"source_name": source_name, "sha256": checksum},
+            select(ctl_file_registry.c.file_id).where(
+                ctl_file_registry.c.source_name == source_name,
+                ctl_file_registry.c.sha256 == checksum,
+            )
         ).scalar_one_or_none()
 
         if existing is not None:
             conn.execute(
-                text(
-                    """
-                    UPDATE ctl_file_registry
-                    SET source_id = :source_id,
-                        storage_path = :storage_path,
-                        file_format = :file_format,
-                        status = 'REGISTERED'
-                    WHERE file_id = :file_id
-                    """
-                ),
-                {
-                    "source_id": source_id,
-                    "storage_path": str(path),
-                    "file_format": file_format,
-                    "file_id": existing,
-                },
+                update(ctl_file_registry)
+                .where(ctl_file_registry.c.file_id == existing)
+                .values(
+                    source_id=source_id,
+                    storage_path=str(path),
+                    file_format=file_format,
+                    status="REGISTERED",
+                )
             )
             return int(existing)
 
         result = conn.execute(
-            text(
-                """
-                INSERT INTO ctl_file_registry (
-                    source_id, source_name, storage_path, file_format, sha256, status
-                )
-                VALUES (
-                    :source_id, :source_name, :storage_path,
-                    :file_format, :sha256, 'REGISTERED'
-                )
-                """
-            ),
-            {
-                "source_id": source_id,
-                "source_name": source_name,
-                "storage_path": str(path),
-                "file_format": file_format,
-                "sha256": checksum,
-            },
+            insert(ctl_file_registry).values(
+                source_id=source_id,
+                source_name=source_name,
+                storage_path=str(path),
+                file_format=file_format,
+                sha256=checksum,
+                status="REGISTERED",
+            )
         )
         return int(result.lastrowid)
