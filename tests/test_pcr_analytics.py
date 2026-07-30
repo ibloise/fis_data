@@ -8,7 +8,11 @@ from sqlalchemy import create_engine, insert, text
 
 from fis_data.cli import cli
 from fis_data.etl.pcr.analytics.domain import (
+    classify_run,
+    classify_sample_name,
     evaluate_screening_target_qc,
+    group_result_candidates,
+    sample_key,
     summarize_results,
 )
 from fis_data.etl.pcr.analytics.facade import (
@@ -20,7 +24,12 @@ from fis_data.etl.pcr.analytics.facade import (
 from fis_data.etl.pcr.analytics.models import QCObservation, ResultCandidate
 from fis_data.etl.pcr.analytics.pipeline import PCRAnalyticsPipeline
 from fis_data.etl.pcr.analytics.repository import PCRAnalyticsRepository
-from fis_data.etl.pcr.melting import MeltingParameters, calculate_peaks, interpret_curve
+from fis_data.etl.pcr.melting import (
+    MeltingParameters,
+    calculate_peaks,
+    canonical_target,
+    interpret_curve,
+)
 from fis_data.etl.pcr.review.repository import PCRReviewRepository
 from fis_data.etl.pcr.review.service import PCRReviewService
 from fis_data.schema import (
@@ -29,11 +38,89 @@ from fis_data.schema import (
     ctl_file_registry,
     ctl_source,
     pcr_cq_result,
+    pcr_derivation_run,
     pcr_rfu_measurement,
     pcr_run,
     pcr_run_attribute,
     pcr_well,
 )
+
+
+def test_successful_derivation_is_atomically_promoted_as_current(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'current.sqlite'}", future=True)
+    create_schema(engine)
+    repository = PCRAnalyticsRepository(engine)
+
+    first_id = repository.start_derivation(
+        algorithm_version="first", parameters_json="{}"
+    )
+    repository.finish_derivation(first_id, status="SUCCESS", details_json="{}")
+    failed_id = repository.start_derivation(
+        algorithm_version="failed", parameters_json="{}"
+    )
+    repository.finish_derivation(failed_id, status="FAILED", details_json="{}")
+    second_id = repository.start_derivation(
+        algorithm_version="second", parameters_json="{}"
+    )
+    repository.finish_derivation(second_id, status="SUCCESS", details_json="{}")
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            pcr_derivation_run.select().order_by(pcr_derivation_run.c.derivation_id)
+        ).mappings()
+        current_by_id = {
+            int(row["derivation_id"]): bool(row["is_current"]) for row in rows
+        }
+
+    assert current_by_id == {first_id: False, failed_id: False, second_id: True}
+
+
+def test_create_schema_initializes_current_derivation_on_legacy_schema(
+    tmp_path,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.sqlite'}", future=True)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE pcr_derivation_run (
+                    derivation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    algorithm_version VARCHAR(100) NOT NULL,
+                    rule_version VARCHAR(40) NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    status VARCHAR(30) NOT NULL,
+                    details_json TEXT,
+                    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO pcr_derivation_run (
+                    algorithm_version, rule_version, parameters_json, status
+                ) VALUES
+                    ('first', '1.0', '{}', 'SUCCESS'),
+                    ('failed', '1.0', '{}', 'FAILED'),
+                    ('second', '1.0', '{}', 'SUCCESS')
+                """
+            )
+        )
+
+    create_schema(engine)
+
+    with engine.connect() as conn:
+        current_ids = conn.execute(
+            text(
+                """
+                SELECT derivation_id FROM pcr_derivation_run
+                WHERE is_current=1
+                """
+            )
+        ).scalars()
+        assert list(current_ids) == [3]
 
 
 def test_melting_handles_zero_curve_and_screening_multimodal() -> None:
@@ -60,6 +147,57 @@ def test_melting_handles_zero_curve_and_screening_multimodal() -> None:
         "NDM": "POSITIVE",
         "KPC": "POSITIVE",
     }
+
+
+def test_fail_target_marks_the_whole_run_as_failed() -> None:
+    assert classify_run(frozenset({canonical_target("FAIL-2"), "OXA48"})) == (
+        "FAILED",
+        "RUN FAILED",
+    )
+
+
+def test_specific_target_preserves_cq_as_indeterminate_on_melting_mismatch() -> None:
+    calls, peaks = interpret_curve(
+        source_target="OXA48",
+        cq=21.2,
+        temperatures=[81.5, 82.0, 82.5, 83.0, 83.5],
+        derivatives=[0, 100, 500, 100, 0],
+        params=MeltingParameters(),
+    )
+
+    assert len(peaks) == 1
+    assert calls[0].call == "INDETERMINATE"
+    assert calls[0].error == "MELTING_INCOMPATIBLE"
+    assert calls[0].peak_temperature == 82.5
+    assert calls[0].compatible_targets == ("VIM",)
+
+
+def test_numeric_sample_keys_preserve_leading_zeroes() -> None:
+    role, normalized, rule, review = classify_sample_name(" 061991301 ")
+
+    assert role == "REAL_SAMPLE"
+    assert normalized == "061991301"
+    assert rule == "NUMERIC"
+    assert review is None
+    assert sample_key("061991301") == "061991301"
+    assert sample_key("61991301") == "61991301"
+    assert sample_key("061991301") != sample_key("61991301")
+
+
+def test_control_content_repairs_missing_sample_and_warns_on_real_sample() -> None:
+    assert classify_sample_name(None, "Neg Ctrl")[:3] == (
+        "NEGATIVE_CONTROL",
+        "NEG_CTRL",
+        "CONTENT_NEGATIVE_CONTROL",
+    )
+    assert classify_sample_name(None, "Pos Ctrl")[:3] == (
+        "POSITIVE_CONTROL",
+        "POS_CTRL",
+        "CONTENT_POSITIVE_CONTROL",
+    )
+    role, normalized, rule, review = classify_sample_name("12345", "Pos Ctrl")
+    assert (role, normalized, rule) == ("REAL_SAMPLE", "12345", "NUMERIC")
+    assert review == "Content indicates a control for a real sample."
 
 
 def test_episode_pairing_and_latest_valid_result_rules() -> None:
@@ -169,7 +307,7 @@ def _screening_qc_observation(
     return QCObservation(1, target, "Screening", "SCREENING", role, call, cq)
 
 
-def test_screening_qc_accepts_valid_cq_with_one_working_melting_target() -> None:
+def test_screening_qc_accepts_global_positive_and_negative_controls() -> None:
     observations = [
         _screening_qc_observation("KPC", "POSITIVE_CONTROL", "NEGATIVE", 20),
         _screening_qc_observation("NDM", "POSITIVE_CONTROL", "NEGATIVE", 20),
@@ -186,11 +324,11 @@ def test_screening_qc_accepts_valid_cq_with_one_working_melting_target() -> None
     assert assessment.valid
     assert assessment.status == "VALID"
     assert assessment.failures == ()
-    assert assessment.details["working_target"] == "VIM"
-    assert assessment.details["working_targets"] == ["VIM"]
+    assert assessment.details["positive_control_positive"] is True
+    assert assessment.details["negative_control_negative"] is True
 
 
-def test_screening_qc_rejects_positive_control_cq_outside_range() -> None:
+def test_screening_qc_does_not_reject_a_positive_control_by_cq_alone() -> None:
     observations = [
         _screening_qc_observation("VIM", "POSITIVE_CONTROL", "POSITIVE", 41),
         _screening_qc_observation("VIM", "NEGATIVE_CONTROL", "NEGATIVE", 25),
@@ -198,10 +336,21 @@ def test_screening_qc_rejects_positive_control_cq_outside_range() -> None:
 
     assessment = evaluate_screening_target_qc(observations)
 
+    assert assessment.valid
+    assert assessment.status == "VALID"
+    assert assessment.failures == ()
+
+
+def test_screening_qc_rejects_a_non_negative_negative_control() -> None:
+    observations = [
+        _screening_qc_observation("VIM", "POSITIVE_CONTROL", "POSITIVE", 20),
+        _screening_qc_observation("VIM", "NEGATIVE_CONTROL", "INDETERMINATE", 25),
+    ]
+
+    assessment = evaluate_screening_target_qc(observations)
+
     assert not assessment.valid
-    assert assessment.status == "INVALID"
-    assert assessment.failures == ("POSITIVE_CONTROL_NOT_POSITIVE",)
-    assert assessment.details["positive_control_cq_valid"] is False
+    assert assessment.failures == ("NEGATIVE_CONTROL_NOT_NEGATIVE",)
 
 
 def test_partial_overlap_panel_runs_do_not_pair_across_different_dates() -> None:
@@ -237,6 +386,7 @@ def test_typed_result_selection_prefers_latest_valid_candidate() -> None:
             run_id=1,
             started="2024-01-01 10:00:00",
             run_class="PANEL_KPC_NDM",
+            run_type="SPECIFIC",
             valid=True,
         ),
         ResultCandidate(
@@ -249,6 +399,7 @@ def test_typed_result_selection_prefers_latest_valid_candidate() -> None:
             run_id=2,
             started="2024-01-02 10:00:00",
             run_class="PANEL_KPC_NDM",
+            run_type="SPECIFIC",
             valid=True,
         ),
     ]
@@ -258,6 +409,24 @@ def test_typed_result_selection_prefers_latest_valid_candidate() -> None:
     assert summary.preferred == 2
     assert summary.concordance == "CONCORDANT"
     assert not summary.needs_review
+
+
+def test_result_candidates_are_separated_by_global_run_type() -> None:
+    specific = ResultCandidate(
+        interpretation_id=1, result_id=1, sample_id=7, sample_key="7", target="KPC",
+        call="POSITIVE", run_id=1, started=None, run_class="PANEL_KPC_NDM",
+        run_type="SPECIFIC", valid=True,
+    )
+    screening = ResultCandidate(
+        interpretation_id=2, result_id=2, sample_id=7, sample_key="7", target="KPC",
+        call="NEGATIVE", run_id=2, started=None, run_class="SCREENING",
+        run_type="SCREENING", valid=True,
+    )
+
+    assert set(group_result_candidates([specific, screening])) == {
+        (7, "SPECIFIC", "KPC"),
+        (7, "SCREENING", "KPC"),
+    }
 
 
 def test_analytics_job_is_a_facade_over_injected_collaborators() -> None:
@@ -283,7 +452,6 @@ def test_analytics_job_is_a_facade_over_injected_collaborators() -> None:
     pipeline.classify_runs.assert_called_once_with(42)
     pipeline.set_overrides.assert_called_once_with([])
     repository.finish_derivation.assert_called_once()
-    repository.create_views.assert_called_once_with()
 
 
 def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> None:
@@ -445,7 +613,7 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
         ("PRUEBA", "NON_SAMPLE_REVIEW"),
     ]
     assert target_qc == ("INVALID", 0)
-    assert selection == ("123", None, "NO_VALID_RESULT", 1)
+    assert selection == ("00123", None, "NO_VALID_RESULT", 1)
 
     review_service = PCRReviewService(PCRReviewRepository(engine))
     review_items = review_service.list_items(limit=20)
@@ -504,7 +672,7 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
             text(
                 """
                 SELECT call, has_override FROM v_pcr_effective_result
-                WHERE sample_key='123' AND canonical_target='KPC'
+                WHERE sample_key='00123' AND canonical_target='KPC'
                 """
             )
         ).one()

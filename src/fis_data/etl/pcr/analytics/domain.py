@@ -16,6 +16,7 @@ from ..enums import (
     ResultLevels,
     ResultRelations,
     RunClasses,
+    RunTypes,
     WellRoles,
 )
 from .models import (
@@ -43,10 +44,17 @@ EPISODE_FULL_OVERLAP_CLASSES = {
 
 def classify_sample_name(
     value: Any,
+    content: Any = None,
 ) -> tuple[str, str | None, str, str | None]:
-    """Classify a raw sample name and return role, normalization and evidence."""
+    """Classify a well using sample name and, when needed, its content label."""
+
+    content_role = _control_role_from_text(content)
 
     if value is None or not str(value).strip():
+        if content_role == WellRoles.positive_control:
+            return content_role, "POS_CTRL", "CONTENT_POSITIVE_CONTROL", None
+        if content_role == WellRoles.negative_control:
+            return content_role, "NEG_CTRL", "CONTENT_NEGATIVE_CONTROL", None
         return (
             WellRoles.non_sample_review,
             None,
@@ -55,6 +63,13 @@ def classify_sample_name(
         )
     raw = str(value).strip()
     if raw.isdigit():
+        if content_role is not None:
+            return (
+                WellRoles.real_sample,
+                sample_key(raw),
+                ClassificationRules.numeric,
+                "Content indicates a control for a real sample.",
+            )
         return WellRoles.real_sample, sample_key(raw), ClassificationRules.numeric, None
     normalized = re.sub(r"\s+", "", raw.upper())
     if normalized in POSITIVE_CONTROLS:
@@ -69,6 +84,19 @@ def classify_sample_name(
     )
 
 
+def _control_role_from_text(value: Any) -> str | None:
+    """Recognize control labels embedded in a sample/content text."""
+
+    if value is None or not str(value).strip():
+        return None
+    normalized = re.sub(r"[^A-Z0-9]+", " ", str(value).upper()).strip()
+    if re.search(r"(?:POSITIVE|POS)\s+CTRL|\bCP(?:NEW|OLD)?\b|\bC\+\b", normalized):
+        return WellRoles.positive_control
+    if re.search(r"(?:NEGATIVE|NEG)\s+CTRL|\bCNEG\b|\bCN\b|\bC-\b", normalized):
+        return WellRoles.negative_control
+    return None
+
+
 def is_real_sample(value: Any) -> bool:
     """Return whether a raw sample name identifies a real numeric sample."""
 
@@ -76,14 +104,16 @@ def is_real_sample(value: Any) -> bool:
 
 
 def sample_key(value: str) -> str:
-    """Canonicalize a numeric sample identifier without losing zero itself."""
+    """Preserve the complete numeric sample identifier as its canonical key."""
 
-    return value.lstrip("0") or "0"
+    return value.strip()
 
 
 def classify_run(targets: set[str] | frozenset[str]) -> tuple[str, str | None]:
     """Classify a run from its canonical target set."""
 
+    if PCRTargets.fail in targets:
+        return RunClasses.failed, "RUN FAILED"
     if PCRTargets.screening in targets:
         return RunClasses.screening, None
     if {
@@ -101,6 +131,12 @@ def classify_run(targets: set[str] | frozenset[str]) -> tuple[str, str | None]:
     if targets & CARBAPENEMASE_TARGETS:
         return RunClasses.compensation_partial, None
     return RunClasses.other, f"Unrecognized target set: {sorted(targets)}"
+
+
+def run_type_for_class(run_class: str) -> str:
+    """Map detailed analytical classes to the global result category."""
+
+    return RunTypes.screening if run_class == RunClasses.screening else RunTypes.specific
 
 
 def parse_cfx_datetime(value: Any) -> str | None:
@@ -281,16 +317,18 @@ def summarize_results(items: list[ResultCandidate], *, target: str) -> ResultSum
 
 def group_result_candidates(
     candidates: list[ResultCandidate],
-) -> dict[tuple[int, str], list[ResultCandidate]]:
-    """Group result candidates by sample and canonical target."""
+) -> dict[tuple[int, str, str], list[ResultCandidate]]:
+    """Group result candidates by sample, global run type and target."""
 
     grouped: dict[tuple[int, str], list[ResultCandidate]] = defaultdict(list)
     for candidate in candidates:
-        grouped[(candidate.sample_id, candidate.target)].append(candidate)
+        grouped[(candidate.sample_id, candidate.run_type, candidate.target)].append(candidate)
     return grouped
 
 
-def evaluate_target_qc(roles: dict[str, list[str]]) -> TargetQCAssessment:
+def evaluate_target_qc(
+    roles: dict[str, list[str]], *, positive_melting_incompatible: bool = False
+) -> TargetQCAssessment:
     """Evaluate positive and negative control calls for one target."""
 
     positive = roles.get(WellRoles.positive_control, [])
@@ -302,7 +340,11 @@ def evaluate_target_qc(roles: dict[str, list[str]]) -> TargetQCAssessment:
     if not negative:
         warnings.append(QCIssues.missing_negative_control)
     if any(call != ResultLevels.positive for call in positive):
-        failures.append(QCIssues.positive_control_not_positive)
+        failures.append(
+            QCIssues.positive_control_melting_incompatible
+            if positive_melting_incompatible
+            else QCIssues.positive_control_not_positive
+        )
     if any(call == ResultLevels.positive for call in negative):
         failures.append(QCIssues.negative_control_positive)
     if any(call == ResultLevels.indeterminate for call in negative):
@@ -324,11 +366,8 @@ def evaluate_target_qc(roles: dict[str, list[str]]) -> TargetQCAssessment:
 
 def evaluate_screening_target_qc(
     observations: list[QCObservation],
-    *,
-    cq_lower_limit: float = 5,
-    cq_upper_limit: float = 40,
 ) -> TargetQCAssessment:
-    """Evaluate Screening controls at source-target level for derived targets."""
+    """Evaluate global positive and negative controls for a Screening run."""
 
     positive = [
         item
@@ -348,26 +387,16 @@ def evaluate_screening_target_qc(
         warnings.append(QCIssues.missing_positive_control)
     if not negative:
         warnings.append(QCIssues.missing_negative_control)
-    positive_with_valid_cq = [
-        item
-        for item in positive
-        if item.cq is not None and cq_lower_limit < item.cq < cq_upper_limit
-    ]
-    working_targets = sorted(
-        {
-            item.target
-            for item in positive_with_valid_cq
-            if item.call == ResultLevels.positive
-        }
+    positive_control_positive = any(
+        item.call == ResultLevels.positive for item in positive
     )
-    if positive and not positive_with_valid_cq:
+    negative_control_negative = bool(negative) and all(
+        item.call == ResultLevels.negative for item in negative
+    )
+    if positive and not positive_control_positive:
         failures.append(QCIssues.positive_control_not_positive)
-    elif positive and not working_targets:
-        failures.append(QCIssues.positive_control_not_positive)
-    if any(item.call == ResultLevels.positive for item in negative):
-        failures.append(QCIssues.negative_control_positive)
-    if any(item.call == ResultLevels.indeterminate for item in negative):
-        warnings.append(QCIssues.negative_control_indeterminate)
+    if negative and not negative_control_negative:
+        failures.append(QCIssues.negative_control_not_negative)
     return TargetQCAssessment(
         status=(
             QCStatuses.invalid
@@ -383,9 +412,8 @@ def evaluate_screening_target_qc(
         failures=tuple(failures),
         details={
             "screening_qc": True,
-            "positive_control_cq_valid": bool(positive_with_valid_cq),
-            "working_targets": working_targets,
-            "working_target": working_targets[0] if working_targets else None,
+            "positive_control_positive": positive_control_positive,
+            "negative_control_negative": negative_control_negative,
         },
     )
 

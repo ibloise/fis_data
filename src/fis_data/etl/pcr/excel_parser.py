@@ -34,7 +34,7 @@ def parse_quantification_cq_row(
         fluor = _optional_text(row, header_index, "fluor")
         target = _required_text(row, header_index, "target")
         content = _optional_text(row, header_index, "content")
-        sample = _required_text(row, header_index, "sample")
+        sample = _optional_text(row, header_index, "sample")
         cq = _optional_float(row, header_index, "cq")
         cq_mean = _optional_float(row, header_index, "cq_mean")
         cq_std_dev = _optional_float(row, header_index, "cq_std_dev")

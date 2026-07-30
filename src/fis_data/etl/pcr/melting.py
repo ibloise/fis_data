@@ -48,10 +48,13 @@ class MeltingCall:
     peak_temperature: float | None = None
     peak_deriv_rfu: float | None = None
     error: str | None = None
+    compatible_targets: tuple[str, ...] = ()
 
 
 def canonical_target(target: str) -> str:
     normalized = target.strip().upper()
+    if "FAIL" in normalized:
+        return PCRTargets.fail
     if normalized == PCRTargetAliases.oxa:
         return PCRTargets.oxa48
     if normalized == PCRTargetAliases.screening:
@@ -151,14 +154,39 @@ def interpret_curve(
             and abs(peak.temperature - expected_temperature) <= params.peak_temp_range
         ]
         best = max(candidates, key=lambda peak: peak.deriv_rfu, default=None)
+        observed = max(peaks, key=lambda peak: peak.deriv_rfu, default=None)
+        compatible_targets = ()
+        if best is None and observed is not None:
+            distances = {
+                candidate_target: abs(observed.temperature - candidate_temperature)
+                for candidate_target, candidate_temperature in params.targets.items()
+            }
+            nearest_distance = min(distances.values())
+            if nearest_distance <= 5:
+                compatible_targets = tuple(
+                    candidate_target
+                    for candidate_target, distance in distances.items()
+                    if distance == nearest_distance
+                )
+        melting_incompatible = (
+            target != PCRTargets.screening and cq_valid and best is None
+        )
         calls.append(
             MeltingCall(
                 target=output_target,
-                call=ResultLevels.positive
-                if cq_valid and best is not None
-                else ResultLevels.negative,
-                peak_temperature=best.temperature if best else None,
-                peak_deriv_rfu=best.deriv_rfu if best else None,
+                call=(
+                    ResultLevels.positive
+                    if cq_valid and best is not None
+                    else (
+                        ResultLevels.indeterminate
+                        if melting_incompatible
+                        else ResultLevels.negative
+                    )
+                ),
+                peak_temperature=(best or observed).temperature if (best or observed) else None,
+                peak_deriv_rfu=(best or observed).deriv_rfu if (best or observed) else None,
+                error="MELTING_INCOMPATIBLE" if melting_incompatible else None,
+                compatible_targets=compatible_targets,
             )
         )
     return calls, peaks

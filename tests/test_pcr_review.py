@@ -27,8 +27,8 @@ def _review_engine(tmp_path):
                 """
                 INSERT INTO pcr_derivation_run (
                     derivation_id, algorithm_version, rule_version,
-                    parameters_json, status
-                ) VALUES (1, 'test', '1.0', '{}', 'SUCCESS')
+                    parameters_json, status, is_current
+                ) VALUES (1, 'test', '1.0', '{}', 'SUCCESS', 1)
                 """
             )
         )
@@ -47,7 +47,7 @@ def _review_engine(tmp_path):
             text(
                 """
                 INSERT INTO pcr_run_analysis VALUES (
-                    1, 1, 'OTHER', NULL, NULL, '[]', 'Unknown run targets'
+                    1, 1, 'OTHER', 'SPECIFIC', NULL, NULL, '[]', 'Unknown run targets'
                 )
                 """
             )
@@ -89,7 +89,7 @@ def _review_engine(tmp_path):
             text(
                 """
                 INSERT INTO pcr_result_selection VALUES (
-                    1, 1, 'KPC', 100, 1, 'SINGLE', 'DISCORDANT', 1, '{}'
+                    1, 1, 'SPECIFIC', 'KPC', 100, 1, 'SINGLE', 'DISCORDANT', 1, '{}'
                 )
                 """
             )

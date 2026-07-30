@@ -108,7 +108,6 @@ class PCRAnalyticsJob:
                 status=DerivationStatuses.success,
                 details_json=_json(asdict(stats)),
             )
-            self.repository.create_views()
             return stats
         except Exception as exc:
             self.repository.finish_derivation(
@@ -142,6 +141,7 @@ def _summarize_results(items: list[dict[str, Any]], *, target: str) -> dict[str,
             run_id=int(item["run_id"]),
             started=item["started"],
             run_class=str(item["run_class"]),
+            run_type=str(item.get("run_type", "SPECIFIC")),
             valid=bool(item["valid"]),
         )
         for item in items

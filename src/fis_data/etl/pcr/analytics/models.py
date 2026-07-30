@@ -46,6 +46,7 @@ class RunAnalysis:
     derivation_id: int
     run_id: int
     run_class: str
+    run_type: str
     run_started: str | None
     episode_key: str | None
     targets: str
@@ -88,7 +89,7 @@ class InterpretationInsert:
     peak_rfu: float | None
     peaks: str
     metrics: str
-    error: str | None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ class QCObservation:
     role: str
     call: str
     cq: float | None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,7 @@ class ResultCandidate:
     run_id: int
     started: str | None
     run_class: str
+    run_type: str
     valid: bool
 
 
@@ -196,6 +199,7 @@ class ResultSelection:
 
     derivation_id: int
     sample_id: int
+    run_type: str
     target: str
     preferred: int | None
     count: int

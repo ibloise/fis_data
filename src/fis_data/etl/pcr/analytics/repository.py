@@ -74,21 +74,33 @@ class PCRAnalyticsRepository:
     def finish_derivation(
         self, derivation_id: int, *, status: str, details_json: str
     ) -> None:
-        """Mark a derivation terminal and store its execution details."""
+        """Finish a derivation and atomically promote it when successful."""
 
         with self.engine.begin() as conn:
+            if status == DerivationStatuses.success:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE pcr_derivation_run
+                        SET is_current=0
+                        WHERE is_current=1 AND derivation_id<>:derivation_id
+                        """
+                    ),
+                    {"derivation_id": derivation_id},
+                )
             conn.execute(
                 text(
                     """
                     UPDATE pcr_derivation_run
                     SET status=:status, details_json=:details,
-                        finished_at=CURRENT_TIMESTAMP
+                        is_current=:is_current, finished_at=CURRENT_TIMESTAMP
                     WHERE derivation_id=:derivation_id
                     """
                 ),
                 {
                     "status": status,
                     "details": details_json,
+                    "is_current": status == DerivationStatuses.success,
                     "derivation_id": derivation_id,
                 },
             )
@@ -192,10 +204,10 @@ class PCRAnalyticsRepository:
         self._insert_many(
             """
             INSERT INTO pcr_run_analysis (
-                derivation_id, pcr_run_id, run_class, run_started,
+                derivation_id, pcr_run_id, run_class, run_type, run_started,
                 episode_date_key, canonical_targets_json, review_reason
             ) VALUES (
-                :derivation_id, :run_id, :run_class, :run_started,
+                :derivation_id, :run_id, :run_class, :run_type, :run_started,
                 :episode_key, :targets, :review
             )
             """,
@@ -295,7 +307,8 @@ class PCRAnalyticsRepository:
                            analysis.run_class,
                            classification.well_role,
                            interpretation.call,
-                           interpretation.cq
+                           interpretation.cq,
+                           interpretation.error
                     FROM pcr_interpretation AS interpretation
                     JOIN pcr_run_analysis AS analysis
                       ON analysis.derivation_id = interpretation.derivation_id
@@ -317,6 +330,7 @@ class PCRAnalyticsRepository:
                 role=str(row[4]),
                 call=str(row[5]),
                 cq=float(row[6]) if row[6] is not None else None,
+                error=_optional_str(row[7]),
             )
             for row in rows
         ]
@@ -462,7 +476,7 @@ class PCRAnalyticsRepository:
                            sample.sample_key,
                            interpretation.canonical_target, interpretation.call,
                            interpretation.pcr_run_id, analysis.run_started,
-                           analysis.run_class, qc.is_valid
+                           analysis.run_class, analysis.run_type, qc.is_valid
                     FROM pcr_interpretation AS interpretation
                     JOIN pcr_well_classification AS classification
                       ON classification.derivation_id = interpretation.derivation_id
@@ -496,7 +510,8 @@ class PCRAnalyticsRepository:
                 run_id=int(row[6]),
                 started=_optional_str(row[7]),
                 run_class=str(row[8]),
-                valid=bool(row[9]),
+                run_type=str(row[9]),
+                valid=bool(row[10]),
             )
             for row in rows
         ]
@@ -507,11 +522,11 @@ class PCRAnalyticsRepository:
         self._insert_many(
             """
             INSERT INTO pcr_result_selection (
-                derivation_id, pcr_sample_id, canonical_target,
+                derivation_id, pcr_sample_id, run_type, canonical_target,
                 preferred_interpretation_id, occurrence_count,
                 relation_kind, concordance, needs_review, details_json
             ) VALUES (
-                :derivation_id, :sample_id, :target, :preferred, :count,
+                :derivation_id, :sample_id, :run_type, :target, :preferred, :count,
                 :relation, :concordance, :review, :details
             )
             """,
@@ -543,15 +558,6 @@ class PCRAnalyticsRepository:
                     {"id": derivation_id},
                 ).scalars()
             )
-
-    def create_views(self) -> None:
-        """Recreate public views over the latest successful derivation."""
-
-        views = _analytical_views()
-        with self.engine.begin() as conn:
-            for name, select_sql in views.items():
-                conn.execute(text(f"DROP VIEW IF EXISTS {name}"))  # noqa: B608
-                conn.execute(text(f"CREATE VIEW {name} AS {select_sql}"))  # noqa: B608
 
     def _insert_many(self, statement: str, rows: Iterable[Any]) -> None:
         """Serialize dataclass rows and execute a batched insert transaction."""
@@ -587,110 +593,3 @@ def _clear_derived_model(conn: Connection) -> None:
         "pcr_derivation_run",
     ):
         conn.execute(text(f"DELETE FROM {table}"))  # noqa: B608
-
-
-def _analytical_views() -> dict[str, str]:
-    """Return SQL definitions for stable public PCR views."""
-
-    latest = "SELECT MAX(derivation_id) FROM pcr_derivation_run WHERE status='SUCCESS'"
-    return {
-        "v_pcr_current_result": f"""
-            SELECT sample.sample_key, selection.canonical_target,
-                   interpretation.call, interpretation.cq,
-                   interpretation.peak_temperature, interpretation.pcr_run_id,
-                   selection.occurrence_count, selection.relation_kind,
-                   selection.concordance, selection.needs_review
-            FROM pcr_result_selection AS selection
-            JOIN pcr_sample AS sample
-              ON sample.pcr_sample_id = selection.pcr_sample_id
-            LEFT JOIN pcr_interpretation AS interpretation
-              ON interpretation.interpretation_id =
-                 selection.preferred_interpretation_id
-            WHERE selection.derivation_id = ({latest})
-        """,
-        "v_pcr_effective_result": f"""
-            WITH ranked_override AS (
-                SELECT item_type, subject_key, action, payload_json,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY item_type, subject_key
-                           ORDER BY review_action_id DESC
-                       ) AS position
-                FROM pcr_review_action
-                WHERE item_type='RESULT' AND action IN ('OVERRIDE', 'REVOKE')
-            )
-            SELECT sample.sample_key, selection.canonical_target,
-                   COALESCE(
-                       json_extract(override.payload_json, '$.call'),
-                       interpretation.call
-                   ) AS call,
-                   interpretation.cq, interpretation.peak_temperature,
-                   interpretation.pcr_run_id, selection.occurrence_count,
-                   selection.relation_kind, selection.concordance,
-                   selection.needs_review,
-                   CASE WHEN override.action='OVERRIDE' THEN 1 ELSE 0 END
-                       AS has_override
-            FROM pcr_result_selection AS selection
-            JOIN pcr_sample AS sample
-              ON sample.pcr_sample_id=selection.pcr_sample_id
-            LEFT JOIN pcr_interpretation AS interpretation
-              ON interpretation.interpretation_id=
-                 selection.preferred_interpretation_id
-            LEFT JOIN ranked_override AS override
-              ON override.position=1 AND override.action='OVERRIDE'
-             AND override.subject_key=(
-                 'sample:' || sample.sample_key || ':target:' ||
-                 selection.canonical_target
-             )
-            WHERE selection.derivation_id=({latest})
-        """,
-        "v_pcr_result_history": f"""
-            SELECT sample.sample_key, interpretation.canonical_target,
-                   interpretation.call, interpretation.cq,
-                   interpretation.peak_temperature, interpretation.pcr_run_id,
-                   analysis.run_started, analysis.run_class
-            FROM pcr_interpretation AS interpretation
-            JOIN pcr_well_classification AS classification
-              ON classification.derivation_id=interpretation.derivation_id
-             AND classification.pcr_well_id=interpretation.pcr_well_id
-            JOIN pcr_sample AS sample
-              ON sample.pcr_sample_id=classification.pcr_sample_id
-            JOIN pcr_run_analysis AS analysis
-              ON analysis.derivation_id=interpretation.derivation_id
-             AND analysis.pcr_run_id=interpretation.pcr_run_id
-            WHERE interpretation.derivation_id=({latest})
-        """,
-        "v_pcr_run_qc": f"""
-            SELECT run_qc.*, run.run_name FROM pcr_run_qc AS run_qc
-            JOIN pcr_run AS run ON run.pcr_run_id=run_qc.pcr_run_id
-            WHERE run_qc.derivation_id=({latest})
-        """,
-        "v_pcr_episodes": f"""
-            SELECT episode.episode_key, episode.association_status,
-                   episode_run.pcr_run_id, episode_run.run_role,
-                   episode_run.overlap_score
-            FROM pcr_episode AS episode
-            JOIN pcr_episode_run AS episode_run
-              ON episode_run.episode_id=episode.episode_id
-            WHERE episode.derivation_id=({latest})
-        """,
-        "v_pcr_review_queue": f"""
-            SELECT 'WELL' item_type, CAST(pcr_well_id AS TEXT) item_id,
-                   review_reason reason FROM pcr_well_classification
-            WHERE review_reason IS NOT NULL AND derivation_id=({latest})
-            UNION ALL
-            SELECT 'RUN', CAST(pcr_run_id AS TEXT), review_reason
-            FROM pcr_run_analysis
-            WHERE review_reason IS NOT NULL AND derivation_id=({latest})
-            UNION ALL
-            SELECT 'EPISODE', episode_key, review_reason FROM pcr_episode
-            WHERE association_status='REVIEW' AND derivation_id=({latest})
-            UNION ALL
-            SELECT 'TARGET_QC', CAST(pcr_run_id AS TEXT) || ':' || canonical_target,
-                   details_json FROM pcr_target_qc
-            WHERE qc_status='INVALID' AND derivation_id=({latest})
-            UNION ALL
-            SELECT 'RESULT', CAST(pcr_sample_id AS TEXT) || ':' || canonical_target,
-                   concordance FROM pcr_result_selection
-            WHERE needs_review=1 AND derivation_id=({latest})
-        """,
-    }

@@ -27,14 +27,14 @@ class PCRReviewRepository:
         self.engine = engine
 
     def current_derivation_id(self) -> int:
-        """Return the latest successful analytical derivation."""
+        """Return the explicitly selected successful analytical derivation."""
 
         with self.engine.connect() as conn:
             value = conn.execute(
                 text(
                     """
-                    SELECT MAX(derivation_id) FROM pcr_derivation_run
-                    WHERE status='SUCCESS'
+                    SELECT derivation_id FROM pcr_derivation_run
+                    WHERE status='SUCCESS' AND is_current=1
                     """
                 )
             ).scalar_one()
@@ -100,7 +100,7 @@ class PCRReviewRepository:
             result_rows = conn.execute(
                 text(
                     """
-                    SELECT sample.sample_key, selection.canonical_target,
+                    SELECT sample.sample_key, selection.run_type, selection.canonical_target,
                            selection.concordance, selection.relation_kind,
                            selection.occurrence_count
                     FROM pcr_result_selection AS selection
@@ -181,15 +181,16 @@ class PCRReviewRepository:
             items.append(
                 _item(
                     ReviewItemType.result,
-                    f"sample:{str(row[0])}:target:{str(row[1])}",
+                    f"sample:{str(row[0])}:run_type:{str(row[1])}:target:{str(row[2])}",
                     derivation_id,
-                    str(row[2]),
+                    str(row[3]),
                     {
                         "sample_key": str(row[0]),
-                        "target": str(row[1]),
-                        "concordance": str(row[2]),
-                        "relation": str(row[3]),
-                        "occurrences": int(row[4]),
+                        "run_type": str(row[1]),
+                        "target": str(row[2]),
+                        "concordance": str(row[3]),
+                        "relation": str(row[4]),
+                        "occurrences": int(row[5]),
                     },
                 )
             )
@@ -442,6 +443,7 @@ class PCRReviewRepository:
         """Attach candidate interpretations for a result review item."""
 
         sample_key = str(item.context["sample_key"])
+        run_type = str(item.context["run_type"])
         target = str(item.context["target"])
         with self.engine.connect() as conn:
             rows = conn.execute(
@@ -457,12 +459,16 @@ class PCRReviewRepository:
                      AND classification.pcr_well_id=interpretation.pcr_well_id
                     JOIN pcr_sample AS sample
                       ON sample.pcr_sample_id=classification.pcr_sample_id
+                    JOIN pcr_run_analysis AS analysis
+                      ON analysis.derivation_id=interpretation.derivation_id
+                     AND analysis.pcr_run_id=interpretation.pcr_run_id
                     LEFT JOIN pcr_target_qc AS qc
                       ON qc.derivation_id=interpretation.derivation_id
                      AND qc.pcr_run_id=interpretation.pcr_run_id
                      AND qc.canonical_target=interpretation.canonical_target
                     WHERE interpretation.derivation_id=:id
                       AND sample.sample_key=:sample_key
+                      AND analysis.run_type=:run_type
                       AND interpretation.canonical_target=:target
                     ORDER BY interpretation.pcr_run_id
                     """
@@ -470,6 +476,7 @@ class PCRReviewRepository:
                 {
                     "id": item.derivation_id,
                     "sample_key": sample_key,
+                    "run_type": run_type,
                     "target": target,
                 },
             ).all()
