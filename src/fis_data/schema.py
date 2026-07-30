@@ -15,6 +15,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    inspect,
     text,
 )
 from sqlalchemy.engine import Engine
@@ -235,6 +236,19 @@ pcr_run = Table(
     Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
     Column("run_name", String(255), nullable=False),
     Column("run_name_normalized", String(255), nullable=False),
+    Column("run_started", String(255), nullable=True),
+    Column("run_ended", String(255), nullable=True),
+    Column("created_by_user", String(255), nullable=True),
+    Column("base_serial_number", String(255), nullable=True),
+    Column("optical_head_serial_number", String(255), nullable=True),
+    Column("cfx_maestro_version", String(255), nullable=True),
+    Column("protocol_file_name", String(255), nullable=True),
+    Column("plate_setup_file_name", String(255), nullable=True),
+    Column("sample_vol", String(255), nullable=True),
+    Column("lid_temp", String(255), nullable=True),
+    Column("notes", Text, nullable=True),
+    Column("run_metadata_id", String(255), nullable=True),
+    Column("source_file_name", String(255), nullable=True),
     Column(
         "created_at",
         DateTime,
@@ -356,6 +370,7 @@ pcr_derivation_run = Table(
     Column("rule_version", String(40), nullable=False),
     Column("parameters_json", Text, nullable=False),
     Column("status", String(30), nullable=False),
+    Column("is_current", Boolean, nullable=False, server_default=text("0")),
     Column("details_json", Text, nullable=True),
     Column(
         "started_at",
@@ -419,6 +434,7 @@ pcr_run_analysis = Table(
     ),
     Column("pcr_run_id", Integer, ForeignKey("pcr_run.pcr_run_id"), primary_key=True),
     Column("run_class", String(40), nullable=False),
+    Column("run_type", String(20), nullable=False),
     Column("run_started", DateTime, nullable=True),
     Column("episode_date_key", String(10), nullable=True),
     Column("canonical_targets_json", Text, nullable=False),
@@ -546,6 +562,7 @@ pcr_result_selection = Table(
         ForeignKey("pcr_sample.pcr_sample_id"),
         primary_key=True,
     ),
+    Column("run_type", String(20), primary_key=True),
     Column("canonical_target", String(100), primary_key=True),
     Column(
         "preferred_interpretation_id",
@@ -645,6 +662,12 @@ Index(
 Index("idx_pcr_rfu_file", pcr_rfu_measurement.c.file_id)
 Index("idx_pcr_rfu_well", pcr_rfu_measurement.c.pcr_well_id)
 Index(
+    "uq_pcr_derivation_run_current",
+    pcr_derivation_run.c.is_current,
+    unique=True,
+    sqlite_where=pcr_derivation_run.c.is_current.is_(True),
+)
+Index(
     "idx_pcr_interpretation_run_target",
     pcr_interpretation.c.pcr_run_id,
     pcr_interpretation.c.canonical_target,
@@ -664,6 +687,220 @@ def create_schema(engine: Engine) -> None:
     """Create all ETL tables if they do not already exist."""
 
     metadata.create_all(engine)
+    _upgrade_pcr_run_metadata(engine)
+    _upgrade_pcr_run_type(engine)
+    _upgrade_pcr_result_selection_run_type(engine)
+    _upgrade_pcr_derivation_current(engine)
     for table in metadata.tables.values():
         for index in table.indexes:
             index.create(engine, checkfirst=True)
+    create_views(engine)
+
+
+def _upgrade_pcr_run_metadata(engine: Engine) -> None:
+    """Add promoted PCR run metadata columns to existing databases."""
+
+    columns = {str(column["name"]) for column in inspect(engine).get_columns("pcr_run")}
+    additions = {
+        "run_started": "VARCHAR(255)",
+        "run_ended": "VARCHAR(255)",
+        "created_by_user": "VARCHAR(255)",
+        "base_serial_number": "VARCHAR(255)",
+        "optical_head_serial_number": "VARCHAR(255)",
+        "cfx_maestro_version": "VARCHAR(255)",
+        "protocol_file_name": "VARCHAR(255)",
+        "plate_setup_file_name": "VARCHAR(255)",
+        "sample_vol": "VARCHAR(255)",
+        "lid_temp": "VARCHAR(255)",
+        "notes": "TEXT",
+        "run_metadata_id": "VARCHAR(255)",
+        "source_file_name": "VARCHAR(255)",
+    }
+    with engine.begin() as conn:
+        for name, sql_type in additions.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE pcr_run ADD COLUMN {name} {sql_type}"))
+
+
+def _upgrade_pcr_run_type(engine: Engine) -> None:
+    """Add global screening/specific type to legacy run analyses."""
+
+    columns = {str(column["name"]) for column in inspect(engine).get_columns("pcr_run_analysis")}
+    if "run_type" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text("ALTER TABLE pcr_run_analysis ADD COLUMN run_type VARCHAR(20) NOT NULL DEFAULT 'SPECIFIC'")
+        )
+        conn.execute(
+            text("UPDATE pcr_run_analysis SET run_type='SCREENING' WHERE run_class='SCREENING'")
+        )
+
+
+def _upgrade_pcr_result_selection_run_type(engine: Engine) -> None:
+    """Rebuild legacy result selections with run type in their primary key."""
+
+    columns = {str(column["name"]) for column in inspect(engine).get_columns("pcr_result_selection")}
+    if "run_type" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE pcr_result_selection RENAME TO pcr_result_selection_legacy"))
+        pcr_result_selection.create(conn)
+        conn.execute(
+            text(
+                """
+                INSERT INTO pcr_result_selection (
+                    derivation_id, pcr_sample_id, run_type, canonical_target,
+                    preferred_interpretation_id, occurrence_count, relation_kind,
+                    concordance, needs_review, details_json
+                )
+                SELECT derivation_id, pcr_sample_id, 'SPECIFIC', canonical_target,
+                       preferred_interpretation_id, occurrence_count, relation_kind,
+                       concordance, needs_review, details_json
+                FROM pcr_result_selection_legacy
+                """
+            )
+        )
+        conn.execute(text("DROP TABLE pcr_result_selection_legacy"))
+
+
+def create_views(engine: Engine) -> None:
+    """Create the public PCR views managed by the database schema."""
+
+    current = """
+        SELECT derivation_id FROM pcr_derivation_run
+        WHERE status='SUCCESS' AND is_current=1
+    """
+    views = {
+        "v_pcr_current_result": f"""
+            SELECT sample.sample_key, selection.run_type, selection.canonical_target,
+                   interpretation.call, interpretation.cq,
+                   interpretation.peak_temperature, interpretation.pcr_run_id,
+                   selection.occurrence_count, selection.relation_kind,
+                   selection.concordance, selection.needs_review
+            FROM pcr_result_selection AS selection
+            JOIN pcr_sample AS sample
+              ON sample.pcr_sample_id = selection.pcr_sample_id
+            LEFT JOIN pcr_interpretation AS interpretation
+              ON interpretation.interpretation_id =
+                 selection.preferred_interpretation_id
+            WHERE selection.derivation_id = ({current})
+        """,
+        "v_pcr_effective_result": f"""
+            WITH ranked_override AS (
+                SELECT item_type, subject_key, action, payload_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY item_type, subject_key
+                           ORDER BY review_action_id DESC
+                       ) AS position
+                FROM pcr_review_action
+                WHERE item_type='RESULT' AND action IN ('OVERRIDE', 'REVOKE')
+            )
+            SELECT sample.sample_key, selection.run_type, selection.canonical_target,
+                   COALESCE(json_extract(override.payload_json, '$.call'),
+                            interpretation.call) AS call,
+                   interpretation.cq, interpretation.peak_temperature,
+                   interpretation.pcr_run_id, selection.occurrence_count,
+                   selection.relation_kind, selection.concordance,
+                   selection.needs_review,
+                   CASE WHEN override.action='OVERRIDE' THEN 1 ELSE 0 END
+                       AS has_override
+            FROM pcr_result_selection AS selection
+            JOIN pcr_sample AS sample
+              ON sample.pcr_sample_id=selection.pcr_sample_id
+            LEFT JOIN pcr_interpretation AS interpretation
+              ON interpretation.interpretation_id=selection.preferred_interpretation_id
+            LEFT JOIN ranked_override AS override
+              ON override.position=1 AND override.action='OVERRIDE'
+             AND override.subject_key=('sample:' || sample.sample_key ||
+                                       ':run_type:' || selection.run_type ||
+                                       ':target:' || selection.canonical_target)
+            WHERE selection.derivation_id=({current})
+        """,
+        "v_pcr_result_history": f"""
+            SELECT sample.sample_key, interpretation.canonical_target,
+                   interpretation.call, interpretation.cq,
+                   interpretation.peak_temperature, interpretation.pcr_run_id,
+                   analysis.run_started, analysis.run_class, analysis.run_type
+            FROM pcr_interpretation AS interpretation
+            JOIN pcr_well_classification AS classification
+              ON classification.derivation_id=interpretation.derivation_id
+             AND classification.pcr_well_id=interpretation.pcr_well_id
+            JOIN pcr_sample AS sample
+              ON sample.pcr_sample_id=classification.pcr_sample_id
+            JOIN pcr_run_analysis AS analysis
+              ON analysis.derivation_id=interpretation.derivation_id
+             AND analysis.pcr_run_id=interpretation.pcr_run_id
+            WHERE interpretation.derivation_id=({current})
+        """,
+        "v_pcr_run_qc": f"""
+            SELECT run_qc.*, run.run_name FROM pcr_run_qc AS run_qc
+            JOIN pcr_run AS run ON run.pcr_run_id=run_qc.pcr_run_id
+            WHERE run_qc.derivation_id=({current})
+        """,
+        "v_pcr_episodes": f"""
+            SELECT episode.episode_key, episode.association_status,
+                   episode_run.pcr_run_id, episode_run.run_role,
+                   episode_run.overlap_score
+            FROM pcr_episode AS episode
+            JOIN pcr_episode_run AS episode_run
+              ON episode_run.episode_id=episode.episode_id
+            WHERE episode.derivation_id=({current})
+        """,
+        "v_pcr_review_queue": f"""
+            SELECT 'WELL' item_type, CAST(pcr_well_id AS TEXT) item_id,
+                   review_reason reason FROM pcr_well_classification
+            WHERE review_reason IS NOT NULL AND derivation_id=({current})
+            UNION ALL
+            SELECT 'RUN', CAST(pcr_run_id AS TEXT), review_reason
+            FROM pcr_run_analysis
+            WHERE review_reason IS NOT NULL AND derivation_id=({current})
+            UNION ALL
+            SELECT 'EPISODE', episode_key, review_reason FROM pcr_episode
+            WHERE association_status='REVIEW' AND derivation_id=({current})
+            UNION ALL
+            SELECT 'TARGET_QC', CAST(pcr_run_id AS TEXT) || ':' || canonical_target,
+                   details_json FROM pcr_target_qc
+            WHERE qc_status='INVALID' AND derivation_id=({current})
+            UNION ALL
+            SELECT 'RESULT', CAST(pcr_sample_id AS TEXT) || ':' || run_type || ':' || canonical_target,
+                   concordance FROM pcr_result_selection
+            WHERE needs_review=1 AND derivation_id=({current})
+        """,
+    }
+    with engine.begin() as conn:
+        for name, select_sql in views.items():
+            conn.execute(text(f"DROP VIEW IF EXISTS {name}"))
+            conn.execute(text(f"CREATE VIEW {name} AS {select_sql}"))
+
+
+def _upgrade_pcr_derivation_current(engine: Engine) -> None:
+    """Add and initialize explicit derivation control on legacy schemas."""
+
+    columns = {
+        str(column["name"])
+        for column in inspect(engine).get_columns("pcr_derivation_run")
+    }
+    if "is_current" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE pcr_derivation_run
+                ADD COLUMN is_current BOOLEAN NOT NULL DEFAULT 0
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE pcr_derivation_run
+                SET is_current=1
+                WHERE derivation_id=(
+                    SELECT MAX(derivation_id) FROM pcr_derivation_run
+                    WHERE status='SUCCESS'
+                )
+                """
+            )
+        )

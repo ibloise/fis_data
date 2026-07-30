@@ -123,6 +123,7 @@ class PCRMaterializer:
                         errors += 1
 
             conflicts = _refresh_attribute_flags(conn, pcr_run_id=pcr_run_id)
+            _refresh_run_metadata(conn, pcr_run_id=pcr_run_id)
             _refresh_well_metadata(conn, pcr_run_id=pcr_run_id)
             if reprocess:
                 for affected_run_id in affected_run_ids | {pcr_run_id}:
@@ -683,6 +684,44 @@ def _refresh_attribute_flags(conn: Connection, *, pcr_run_id: int) -> int:
     )
 
 
+def _refresh_run_metadata(conn: Connection, *, pcr_run_id: int) -> None:
+    """Promote canonical run attributes into the denormalized run record."""
+
+    conn.execute(
+        text(
+            """
+            UPDATE pcr_run
+            SET run_started=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                             WHERE pcr_run_id=:id AND attribute_key_normalized='run_started' AND is_canonical=1),
+                run_ended=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                           WHERE pcr_run_id=:id AND attribute_key_normalized='run_ended' AND is_canonical=1),
+                created_by_user=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                 WHERE pcr_run_id=:id AND attribute_key_normalized='created_by_user' AND is_canonical=1),
+                base_serial_number=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                    WHERE pcr_run_id=:id AND attribute_key_normalized='base_serial_number' AND is_canonical=1),
+                optical_head_serial_number=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                             WHERE pcr_run_id=:id AND attribute_key_normalized='optical_head_serial_number' AND is_canonical=1),
+                cfx_maestro_version=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                     WHERE pcr_run_id=:id AND attribute_key_normalized='cfx_maestro_version' AND is_canonical=1),
+                protocol_file_name=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                    WHERE pcr_run_id=:id AND attribute_key_normalized='protocol_file_name' AND is_canonical=1),
+                plate_setup_file_name=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                       WHERE pcr_run_id=:id AND attribute_key_normalized='plate_setup_file_name' AND is_canonical=1),
+                sample_vol=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                            WHERE pcr_run_id=:id AND attribute_key_normalized='sample_vol' AND is_canonical=1),
+                lid_temp=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                          WHERE pcr_run_id=:id AND attribute_key_normalized='lid_temp' AND is_canonical=1),
+                notes=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                       WHERE pcr_run_id=:id AND attribute_key_normalized='notes' AND is_canonical=1),
+                run_metadata_id=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                 WHERE pcr_run_id=:id AND attribute_key_normalized='id' AND is_canonical=1),
+                source_file_name=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
+                                  WHERE pcr_run_id=:id AND attribute_key_normalized='file_name' AND is_canonical=1)
+            WHERE pcr_run_id=:id
+            """
+        ),
+        {"id": pcr_run_id},
+    )
 def _refresh_well_metadata(conn: Connection, *, pcr_run_id: int) -> None:
     conn.execute(
         text(
