@@ -7,7 +7,6 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 from ..contracts import JobContext
@@ -19,6 +18,7 @@ from .enums import (
     PCRMeasurementKinds,
     PCRSheetKinds,
 )
+from .repository import PCRMaterializationRepository
 
 
 class PCRMaterializer:
@@ -163,43 +163,16 @@ def _ensure_pcr_run(conn: Connection, *, source_id: int, run_name: str) -> int:
     normalized = normalize_profile_token(run_name)
     if not normalized:
         raise ValueError("File Name is empty after normalization.")
-    conn.execute(
-        text(
-            """
-            INSERT INTO pcr_run (source_id, run_name, run_name_normalized)
-            VALUES (:source_id, :run_name, :normalized)
-            ON CONFLICT(source_id, run_name_normalized) DO NOTHING
-            """
-        ),
-        {"source_id": source_id, "run_name": run_name, "normalized": normalized},
-    )
-    return int(
-        conn.execute(
-            text(
-                """
-                SELECT pcr_run_id FROM pcr_run
-                WHERE source_id = :source_id AND run_name_normalized = :normalized
-                """
-            ),
-            {"source_id": source_id, "normalized": normalized},
-        ).scalar_one()
+    return PCRMaterializationRepository(conn).ensure_run(
+        source_id=source_id, run_name=run_name, normalized=normalized
     )
 
 
 def _link_run_file(
     conn: Connection, *, pcr_run_id: int, file_id: int, load_run_id: int
 ) -> None:
-    conn.execute(
-        text(
-            """
-            INSERT INTO pcr_run_file (pcr_run_id, file_id, run_id)
-            VALUES (:pcr_run_id, :file_id, :run_id)
-            ON CONFLICT(file_id) DO UPDATE SET
-                pcr_run_id = excluded.pcr_run_id,
-                run_id = excluded.run_id
-            """
-        ),
-        {"pcr_run_id": pcr_run_id, "file_id": file_id, "run_id": load_run_id},
+    PCRMaterializationRepository(conn).link_run_file(
+        pcr_run_id=pcr_run_id, file_id=file_id, run_id=load_run_id
     )
 
 
@@ -248,43 +221,17 @@ def _materialize_attribute(
     normalized = normalize_profile_token(key)
     if not normalized:
         raise ValueError("Run Information key is empty.")
-    conn.execute(
-        text(
-            """
-            INSERT INTO pcr_run_attribute (
-                pcr_run_id, file_id, raw_excel_row_id, run_id, attribute_key,
-                attribute_key_normalized, value_json
-            ) VALUES (
-                :pcr_run_id, :file_id, :row_id, :run_id, :key, :normalized,
-                :value_json
-            )
-            ON CONFLICT(file_id, attribute_key_normalized) DO UPDATE SET
-                pcr_run_id = excluded.pcr_run_id,
-                raw_excel_row_id = excluded.raw_excel_row_id,
-                run_id = excluded.run_id,
-                attribute_key = excluded.attribute_key,
-                value_json = excluded.value_json
-            """
-        ),
+    attribute_id = PCRMaterializationRepository(conn).upsert_attribute(
         {
             "pcr_run_id": pcr_run_id,
             "file_id": row.file_id,
-            "row_id": row.row_id,
+            "raw_excel_row_id": row.row_id,
             "run_id": ctx.run_id,
-            "key": key,
-            "normalized": normalized,
+            "attribute_key": key,
+            "attribute_key_normalized": normalized,
             "value_json": json.dumps(fields.get("value"), ensure_ascii=False),
-        },
+        }
     )
-    attribute_id = conn.execute(
-        text(
-            """
-            SELECT pcr_run_attribute_id FROM pcr_run_attribute
-            WHERE file_id = :file_id AND attribute_key_normalized = :normalized
-            """
-        ),
-        {"file_id": row.file_id, "normalized": normalized},
-    ).scalar_one()
     return {"table": "pcr_run_attribute", "ids": [int(attribute_id)]}
 
 
@@ -303,66 +250,20 @@ def _ensure_well(
     existing_id = well_ids.get(normalized)
     if existing_id is not None:
         return existing_id
-    conn.execute(
-        text(
-            """
-            INSERT INTO pcr_well (
-                pcr_run_id, well, well_normalized, sample_name, content,
-                file_id, raw_excel_row_id, run_id
-            ) VALUES (
-                :pcr_run_id, :well, :normalized, :sample_name, :content,
-                :file_id, :row_id, :run_id
-            )
-            ON CONFLICT(pcr_run_id, well_normalized) DO UPDATE SET
-                well = excluded.well,
-                sample_name = COALESCE(excluded.sample_name, pcr_well.sample_name),
-                content = COALESCE(excluded.content, pcr_well.content),
-                file_id = CASE WHEN excluded.sample_name IS NOT NULL
-                               THEN excluded.file_id ELSE pcr_well.file_id END,
-                raw_excel_row_id = CASE WHEN excluded.sample_name IS NOT NULL
-                                        THEN excluded.raw_excel_row_id
-                                        ELSE pcr_well.raw_excel_row_id END,
-                run_id = excluded.run_id
-            """
-        ),
+    well_id = PCRMaterializationRepository(conn).ensure_well(
         {
-            "pcr_run_id": pcr_run_id,
-            "well": normalized,
-            "normalized": normalized,
-            "sample_name": _optional_text(sample_name),
-            "content": _optional_text(content),
-            "file_id": row.file_id,
-            "row_id": row.row_id,
-            "run_id": ctx.run_id,
-        },
-    )
-    well_id = int(
-        conn.execute(
-            text(
-                """
-                SELECT pcr_well_id FROM pcr_well
-                WHERE pcr_run_id = :pcr_run_id AND well_normalized = :normalized
-                """
-            ),
-            {"pcr_run_id": pcr_run_id, "normalized": normalized},
-        ).scalar_one()
+            "pcr_run_id": pcr_run_id, "well": normalized,
+            "well_normalized": normalized, "sample_name": _optional_text(sample_name),
+            "content": _optional_text(content), "file_id": row.file_id,
+            "raw_excel_row_id": row.row_id, "run_id": ctx.run_id,
+        }
     )
     well_ids[normalized] = well_id
     return well_id
 
 
 def _load_well_ids(conn: Connection, *, pcr_run_id: int) -> dict[str, int]:
-    rows = conn.execute(
-        text(
-            """
-            SELECT well_normalized, pcr_well_id
-            FROM pcr_well
-            WHERE pcr_run_id = :pcr_run_id
-            """
-        ),
-        {"pcr_run_id": pcr_run_id},
-    ).all()
-    return {str(row[0]): int(row[1]) for row in rows}
+    return PCRMaterializationRepository(conn).well_ids(pcr_run_id)
 
 
 def _ensure_rfu_wells(
@@ -382,29 +283,13 @@ def _ensure_rfu_wells(
     if not missing:
         return
 
-    conn.execute(
-        text(
-            """
-            INSERT INTO pcr_well (
-                pcr_run_id, well, well_normalized, file_id,
-                raw_excel_row_id, run_id
-            ) VALUES (
-                :pcr_run_id, :well, :normalized, :file_id, :row_id, :run_id
-            )
-            ON CONFLICT(pcr_run_id, well_normalized) DO NOTHING
-            """
-        ),
+    PCRMaterializationRepository(conn).ensure_rfu_wells(
         [
-            {
-                "pcr_run_id": pcr_run_id,
-                "well": well,
-                "normalized": normalized,
-                "file_id": row.file_id,
-                "row_id": row.row_id,
-                "run_id": ctx.run_id,
-            }
+            {"pcr_run_id": pcr_run_id, "well": well, "well_normalized": normalized,
+             "file_id": row.file_id, "raw_excel_row_id": row.row_id,
+             "run_id": ctx.run_id}
             for normalized, well in missing.items()
-        ],
+        ]
     )
     well_ids.update(_load_well_ids(conn, pcr_run_id=pcr_run_id))
 
@@ -431,50 +316,14 @@ def _materialize_cq(
     target = str(fields["target"]).strip()
     if not target:
         raise ValueError("PCR target is empty.")
-    conn.execute(
-        text(
-            """
-            INSERT INTO pcr_cq_result (
-                pcr_run_id, pcr_well_id, file_id, raw_excel_row_id, run_id,
-                target, fluor, sample_name, content, cq, cq_mean, cq_std_dev
-            ) VALUES (
-                :pcr_run_id, :well_id, :file_id, :row_id, :run_id,
-                :target, :fluor, :sample_name, :content, :cq, :cq_mean, :cq_std_dev
-            )
-            ON CONFLICT(raw_excel_row_id) DO UPDATE SET
-                pcr_run_id = excluded.pcr_run_id,
-                pcr_well_id = excluded.pcr_well_id,
-                run_id = excluded.run_id,
-                target = excluded.target,
-                fluor = excluded.fluor,
-                sample_name = excluded.sample_name,
-                content = excluded.content,
-                cq = excluded.cq,
-                cq_mean = excluded.cq_mean,
-                cq_std_dev = excluded.cq_std_dev
-            """
-        ),
-        {
-            "pcr_run_id": pcr_run_id,
-            "well_id": well_id,
-            "file_id": row.file_id,
-            "row_id": row.row_id,
-            "run_id": ctx.run_id,
-            "target": target,
-            "fluor": _optional_text(fields.get("fluor")),
-            "sample_name": _optional_text(fields.get("sample")),
-            "content": _optional_text(fields.get("content")),
-            "cq": fields.get("cq"),
-            "cq_mean": fields.get("cq_mean"),
-            "cq_std_dev": fields.get("cq_std_dev"),
-        },
+    result_id = PCRMaterializationRepository(conn).upsert_cq(
+        {"pcr_run_id": pcr_run_id, "pcr_well_id": well_id, "file_id": row.file_id,
+         "raw_excel_row_id": row.row_id, "run_id": ctx.run_id, "target": target,
+         "fluor": _optional_text(fields.get("fluor")),
+         "sample_name": _optional_text(fields.get("sample")),
+         "content": _optional_text(fields.get("content")), "cq": fields.get("cq"),
+         "cq_mean": fields.get("cq_mean"), "cq_std_dev": fields.get("cq_std_dev")}
     )
-    result_id = conn.execute(
-        text(
-            "SELECT pcr_cq_result_id FROM pcr_cq_result WHERE raw_excel_row_id=:row_id"
-        ),
-        {"row_id": row.row_id},
-    ).scalar_one()
     return {"table": "pcr_cq_result", "ids": [int(result_id)]}
 
 
@@ -523,9 +372,9 @@ def _materialize_rfu(
         measurements.append(
             {
                 "pcr_run_id": pcr_run_id,
-                "well_id": well_ids[normalized],
+                "pcr_well_id": well_ids[normalized],
                 "file_id": row.file_id,
-                "row_id": row.row_id,
+                "raw_excel_row_id": row.row_id,
                 "run_id": ctx.run_id,
                 "measurement_kind": measurement_kind,
                 "axis_kind": axis_kind,
@@ -533,27 +382,7 @@ def _materialize_rfu(
                 "rfu": None if rfu is None else float(rfu),
             }
         )
-    conn.execute(
-        text(
-            """
-            INSERT INTO pcr_rfu_measurement (
-                pcr_run_id, pcr_well_id, file_id, raw_excel_row_id, run_id,
-                measurement_kind, axis_kind, axis_value, rfu
-            ) VALUES (
-                :pcr_run_id, :well_id, :file_id, :row_id, :run_id,
-                :measurement_kind, :axis_kind, :axis_value, :rfu
-            )
-            ON CONFLICT(raw_excel_row_id, pcr_well_id) DO UPDATE SET
-                pcr_run_id = excluded.pcr_run_id,
-                run_id = excluded.run_id,
-                measurement_kind = excluded.measurement_kind,
-                axis_kind = excluded.axis_kind,
-                axis_value = excluded.axis_value,
-                rfu = excluded.rfu
-            """
-        ),
-        measurements,
-    )
+    PCRMaterializationRepository(conn).upsert_measurements(measurements)
     return {
         "table": "pcr_rfu_measurement",
         "source_row_id": row.row_id,
@@ -572,224 +401,43 @@ def _record_item(
     error: str | None = None,
     target: dict[str, Any] | None = None,
 ) -> None:
-    conn.execute(
-        text(
-            """
-            INSERT INTO ctl_materialization_item (
-                run_id, source_table, source_row_id, entity_name, file_id,
-                materializer_name, materializer_version, status, error, target_json
-            ) VALUES (
-                :run_id, 'raw_excel_rows', :row_id, :entity_name, :file_id,
-                :name, :version, :status, :error, :target_json
-            )
-            ON CONFLICT(source_table, source_row_id, materializer_name) DO UPDATE SET
-                run_id = excluded.run_id,
-                materializer_version = excluded.materializer_version,
-                status = excluded.status,
-                error = excluded.error,
-                target_json = excluded.target_json,
-                updated_at = CURRENT_TIMESTAMP
-            """
-        ),
-        {
-            "run_id": ctx.run_id,
-            "row_id": row.row_id,
-            "entity_name": ctx.entity_name,
-            "file_id": row.file_id,
-            "name": materializer.materializer_name,
-            "version": materializer.materializer_version,
-            "status": status,
-            "error": error,
-            "target_json": (
-                json.dumps(target, ensure_ascii=False, separators=(",", ":"))
-                if target is not None
-                else None
-            ),
-        },
+    PCRMaterializationRepository(conn).record_item(
+        {"run_id": ctx.run_id, "source_table": "raw_excel_rows",
+         "source_row_id": row.row_id, "entity_name": ctx.entity_name,
+         "file_id": row.file_id, "materializer_name": materializer.materializer_name,
+         "materializer_version": materializer.materializer_version, "status": status,
+         "error": error, "target_json": json.dumps(target, ensure_ascii=False,
+         separators=(",", ":")) if target is not None else None}
     )
 
 
 def _clear_file_materialization(
     conn: Connection, *, file_id: int, materializer_name: str
 ) -> set[int]:
-    affected_run_ids = {
-        int(row[0])
-        for row in conn.execute(
-            text("SELECT pcr_run_id FROM pcr_run_file WHERE file_id = :file_id"),
-            {"file_id": file_id},
-        )
-    }
-    conn.execute(
-        text("DELETE FROM pcr_rfu_measurement WHERE file_id = :file_id"),
-        {"file_id": file_id},
+    return PCRMaterializationRepository(conn).clear_file(
+        file_id=file_id, materializer_name=materializer_name
     )
-    conn.execute(
-        text("DELETE FROM pcr_cq_result WHERE file_id = :file_id"),
-        {"file_id": file_id},
-    )
-    conn.execute(
-        text("DELETE FROM pcr_run_attribute WHERE file_id = :file_id"),
-        {"file_id": file_id},
-    )
-    conn.execute(
-        text("DELETE FROM pcr_run_file WHERE file_id = :file_id"),
-        {"file_id": file_id},
-    )
-    conn.execute(
-        text(
-            """
-            DELETE FROM ctl_materialization_item
-            WHERE file_id = :file_id AND materializer_name = :materializer_name
-            """
-        ),
-        {"file_id": file_id, "materializer_name": materializer_name},
-    )
-    return affected_run_ids
 
 
 def _refresh_attribute_flags(conn: Connection, *, pcr_run_id: int) -> int:
-    conn.execute(
-        text(
-            """
-            UPDATE pcr_run_attribute AS current
-            SET is_canonical = CASE WHEN current.file_id = (
-                    SELECT MIN(candidate.file_id) FROM pcr_run_attribute AS candidate
-                    WHERE candidate.pcr_run_id = current.pcr_run_id
-                      AND candidate.attribute_key_normalized =
-                          current.attribute_key_normalized
-                ) THEN 1 ELSE 0 END,
-                has_conflict = CASE WHEN 1 < (
-                    SELECT COUNT(DISTINCT COALESCE(candidate.value_json, 'null'))
-                    FROM pcr_run_attribute AS candidate
-                    WHERE candidate.pcr_run_id = current.pcr_run_id
-                      AND candidate.attribute_key_normalized =
-                          current.attribute_key_normalized
-                ) THEN 1 ELSE 0 END
-            WHERE current.pcr_run_id = :pcr_run_id
-            """
-        ),
-        {"pcr_run_id": pcr_run_id},
-    )
-    return int(
-        conn.execute(
-            text(
-                """
-                SELECT COUNT(DISTINCT attribute_key_normalized)
-                FROM pcr_run_attribute
-                WHERE pcr_run_id = :pcr_run_id AND has_conflict = 1
-                """
-            ),
-            {"pcr_run_id": pcr_run_id},
-        ).scalar_one()
-    )
+    return PCRMaterializationRepository(conn).refresh_attribute_flags(pcr_run_id)
 
 
 def _refresh_run_metadata(conn: Connection, *, pcr_run_id: int) -> None:
     """Promote canonical run attributes into the denormalized run record."""
-
-    conn.execute(
-        text(
-            """
-            UPDATE pcr_run
-            SET run_started=(SELECT datetime(
-                                substr(json_extract(value_json, '$'), 7, 4) || '-' ||
-                                substr(json_extract(value_json, '$'), 1, 2) || '-' ||
-                                substr(json_extract(value_json, '$'), 4, 2) || ' ' ||
-                                substr(json_extract(value_json, '$'), 12, 8)
-                              ) FROM pcr_run_attribute
-                              WHERE pcr_run_id=:id AND attribute_key_normalized='run_started' AND is_canonical=1),
-                run_ended=(SELECT datetime(
-                              substr(json_extract(value_json, '$'), 7, 4) || '-' ||
-                              substr(json_extract(value_json, '$'), 1, 2) || '-' ||
-                              substr(json_extract(value_json, '$'), 4, 2) || ' ' ||
-                              substr(json_extract(value_json, '$'), 12, 8)
-                            ) FROM pcr_run_attribute
-                            WHERE pcr_run_id=:id AND attribute_key_normalized='run_ended' AND is_canonical=1),
-                created_by_user=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                 WHERE pcr_run_id=:id AND attribute_key_normalized='created_by_user' AND is_canonical=1),
-                base_serial_number=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                    WHERE pcr_run_id=:id AND attribute_key_normalized='base_serial_number' AND is_canonical=1),
-                optical_head_serial_number=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                             WHERE pcr_run_id=:id AND attribute_key_normalized='optical_head_serial_number' AND is_canonical=1),
-                cfx_maestro_version=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                     WHERE pcr_run_id=:id AND attribute_key_normalized='cfx_maestro_version' AND is_canonical=1),
-                protocol_file_name=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                    WHERE pcr_run_id=:id AND attribute_key_normalized='protocol_file_name' AND is_canonical=1),
-                plate_setup_file_name=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                       WHERE pcr_run_id=:id AND attribute_key_normalized='plate_setup_file_name' AND is_canonical=1),
-                sample_vol=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                            WHERE pcr_run_id=:id AND attribute_key_normalized='sample_vol' AND is_canonical=1),
-                lid_temp=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                          WHERE pcr_run_id=:id AND attribute_key_normalized='lid_temp' AND is_canonical=1),
-                notes=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                       WHERE pcr_run_id=:id AND attribute_key_normalized='notes' AND is_canonical=1),
-                run_metadata_id=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                 WHERE pcr_run_id=:id AND attribute_key_normalized='id' AND is_canonical=1),
-                source_file_name=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                                  WHERE pcr_run_id=:id AND attribute_key_normalized='file_name' AND is_canonical=1)
-            WHERE pcr_run_id=:id
-            """
-        ),
-        {"id": pcr_run_id},
-    )
+    PCRMaterializationRepository(conn).refresh_run_metadata(pcr_run_id)
 def _refresh_well_metadata(conn: Connection, *, pcr_run_id: int) -> None:
-    conn.execute(
-        text(
-            """
-            UPDATE pcr_well AS well
-            SET sample_name = (
-                    SELECT result.sample_name FROM pcr_cq_result AS result
-                    WHERE result.pcr_well_id = well.pcr_well_id
-                    ORDER BY result.file_id, result.raw_excel_row_id LIMIT 1
-                ),
-                content = (
-                    SELECT result.content FROM pcr_cq_result AS result
-                    WHERE result.pcr_well_id = well.pcr_well_id
-                    ORDER BY result.file_id, result.raw_excel_row_id LIMIT 1
-                )
-            WHERE well.pcr_run_id = :pcr_run_id
-            """
-        ),
-        {"pcr_run_id": pcr_run_id},
-    )
+    PCRMaterializationRepository(conn).refresh_well_metadata(pcr_run_id)
 
 
 def _delete_orphan_wells(conn: Connection, *, pcr_run_id: int) -> None:
-    conn.execute(
-        text(
-            """
-            DELETE FROM pcr_well
-            WHERE pcr_run_id = :pcr_run_id
-              AND NOT EXISTS (
-                    SELECT 1 FROM pcr_cq_result
-                    WHERE pcr_cq_result.pcr_well_id = pcr_well.pcr_well_id
-                  )
-              AND NOT EXISTS (
-                    SELECT 1 FROM pcr_rfu_measurement
-                    WHERE pcr_rfu_measurement.pcr_well_id = pcr_well.pcr_well_id
-                  )
-            """
-        ),
-        {"pcr_run_id": pcr_run_id},
-    )
+    PCRMaterializationRepository(conn).delete_orphan_wells(pcr_run_id)
 
 
 def _delete_empty_runs(conn: Connection, *, pcr_run_ids: set[int]) -> None:
     if not pcr_run_ids:
         return
-    conn.execute(
-        text(
-            """
-            DELETE FROM pcr_run
-            WHERE pcr_run_id = :pcr_run_id
-              AND NOT EXISTS (
-                    SELECT 1 FROM pcr_run_file
-                    WHERE pcr_run_file.pcr_run_id = pcr_run.pcr_run_id
-                  )
-            """
-        ),
-        [{"pcr_run_id": pcr_run_id} for pcr_run_id in pcr_run_ids],
-    )
+    PCRMaterializationRepository(conn).delete_empty_runs(pcr_run_ids)
 
 
 def _optional_text(value: Any) -> str | None:
