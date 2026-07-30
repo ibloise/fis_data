@@ -115,6 +115,22 @@ def test_materialize_pcr_groups_profiles_and_keeps_lineage(tmp_path) -> None:
                 "PARSED_OK",
             ),
             (
+                "Run Information",
+                _payload(
+                    "run_information",
+                    {"key": "Run Started", "value": "05/16/2023 12:39:01 UTC"},
+                ),
+                "PARSED_OK",
+            ),
+            (
+                "Run Information",
+                _payload(
+                    "run_information",
+                    {"key": "Run Ended", "value": "05/16/2023 13:01:05 UTC"},
+                ),
+                "PARSED_OK",
+            ),
+            (
                 "Cq",
                 _payload(
                     "cq_results",
@@ -233,6 +249,9 @@ def test_materialize_pcr_groups_profiles_and_keeps_lineage(tmp_path) -> None:
         loaded_items = conn.execute(
             text("SELECT COUNT(*) FROM ctl_materialization_item WHERE status='LOADED'")
         ).scalar_one()
+        run_dates = conn.execute(
+            text("SELECT run_started, run_ended FROM pcr_run")
+        ).one()
 
     assert wells == [("A01", "S1"), ("A02", None)]
     assert instruments == [
@@ -240,7 +259,8 @@ def test_materialize_pcr_groups_profiles_and_keeps_lineage(tmp_path) -> None:
         (amplification_file, 0, 1),
         (melt_file, 0, 1),
     ]
-    assert loaded_items == 9
+    assert run_dates == ("2023-05-16 12:39:01", "2023-05-16 13:01:05")
+    assert loaded_items == 11
 
     repeated = CliRunner().invoke(
         cli, ["materialize", "--db-path", str(db_path), "--entity", "PCR"]

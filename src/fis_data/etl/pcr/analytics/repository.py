@@ -5,12 +5,13 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import asdict
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
-from ..enums import DerivationStatuses, PCRMeasurementKinds, WellRoles
+from ..enums import DerivationStatuses, PCRMeasurementKinds, PCRTargets, WellRoles
 from .models import (
     CQResult,
     DerivativeCurve,
@@ -24,10 +25,22 @@ from .models import (
     SourceRun,
     SourceWell,
     TargetQC,
+    TargetQCEvidence,
     WellClassification,
 )
 
 RULE_VERSION = "1.0"
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    """Return a database timestamp while tolerating legacy SQLite text values."""
+
+    if value is None or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 class PCRAnalyticsRepository:
@@ -167,12 +180,8 @@ class PCRAnalyticsRepository:
             run_rows = conn.execute(
                 text(
                     """
-                    SELECT run.pcr_run_id, run.run_name, started.value_json
+                    SELECT run.pcr_run_id, run.run_name, run.run_started
                     FROM pcr_run AS run
-                    LEFT JOIN pcr_run_attribute AS started
-                      ON started.pcr_run_id = run.pcr_run_id
-                     AND started.attribute_key_normalized = 'run_started'
-                     AND started.is_canonical = 1
                     ORDER BY run.pcr_run_id
                     """
                 )
@@ -192,7 +201,7 @@ class PCRAnalyticsRepository:
             SourceRun(
                 run_id=int(row[0]),
                 run_name=str(row[1]),
-                started_json=_optional_str(row[2]),
+                run_started=_as_datetime(row[2]),
                 targets=frozenset(targets_by_run[int(row[0])]),
             )
             for row in run_rows
@@ -301,7 +310,8 @@ class PCRAnalyticsRepository:
             rows = conn.execute(
                 text(
                     """
-                    SELECT interpretation.pcr_run_id,
+                    SELECT interpretation.interpretation_id,
+                           interpretation.pcr_run_id,
                            interpretation.canonical_target,
                            interpretation.source_target,
                            analysis.run_class,
@@ -317,20 +327,25 @@ class PCRAnalyticsRepository:
                       ON classification.derivation_id = interpretation.derivation_id
                      AND classification.pcr_well_id = interpretation.pcr_well_id
                     WHERE interpretation.derivation_id = :derivation_id
+                      AND interpretation.canonical_target != :failed_target
                     """
                 ),
-                {"derivation_id": derivation_id},
+                {
+                    "derivation_id": derivation_id,
+                    "failed_target": PCRTargets.fail,
+                },
             ).all()
         return [
             QCObservation(
-                run_id=int(row[0]),
-                target=str(row[1]),
-                source_target=str(row[2]),
-                run_class=str(row[3]),
-                role=str(row[4]),
-                call=str(row[5]),
-                cq=float(row[6]) if row[6] is not None else None,
-                error=_optional_str(row[7]),
+                interpretation_id=int(row[0]),
+                run_id=int(row[1]),
+                target=str(row[2]),
+                source_target=str(row[3]),
+                run_class=str(row[4]),
+                role=str(row[5]),
+                call=str(row[6]),
+                cq=float(row[7]) if row[7] is not None else None,
+                error=_optional_str(row[8]),
             )
             for row in rows
         ]
@@ -347,6 +362,21 @@ class PCRAnalyticsRepository:
             ) VALUES (
                 :derivation_id, :run_id, :target, :status,
                 :valid, :positive, :negative, :warnings, :details
+            )
+            """,
+            rows,
+        )
+
+    def insert_target_qc_evidence(self, rows: list[TargetQCEvidence]) -> None:
+        """Persist the control interpretations used by each target QC assessment."""
+
+        self._insert_many(
+            """
+            INSERT INTO pcr_target_qc_evidence (
+                derivation_id, pcr_run_id, canonical_target, interpretation_id,
+                well_role
+            ) VALUES (
+                :derivation_id, :run_id, :target, :interpretation_id, :well_role
             )
             """,
             rows,
@@ -585,6 +615,7 @@ def _clear_derived_model(conn: Connection) -> None:
         "pcr_episode_run",
         "pcr_episode",
         "pcr_run_qc",
+        "pcr_target_qc_evidence",
         "pcr_target_qc",
         "pcr_interpretation",
         "pcr_run_analysis",

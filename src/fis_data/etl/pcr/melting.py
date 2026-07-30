@@ -117,9 +117,15 @@ def interpret_curve(
             else ResultLevels.negative
         )
         return [MeltingCall(target=PCRTargets.control_16s, call=call)], []
-    if target in {PCRTargets.fail, PCRTargets.fail_2} or (
-        target != PCRTargets.screening and target not in params.targets
-    ):
+    if target in {PCRTargets.fail, PCRTargets.fail_2}:
+        return [
+            MeltingCall(
+                target=target,
+                call=ResultLevels.indeterminate,
+                error="TARGET FAILED",
+            )
+        ], []
+    if target != PCRTargets.screening and target not in params.targets:
         return [
             MeltingCall(
                 target=target,
@@ -145,6 +151,20 @@ def interpret_curve(
     if target != PCRTargets.screening:
         cq_valid = cq_valid and cq < params.cq_upper_limit
 
+    screening_melting_incompatible = (
+        target == PCRTargets.screening
+        and cq_valid
+        and bool(peaks)
+        and not any(
+            peak.deriv_rfu >= params.drfu_threshold
+            and any(
+                abs(peak.temperature - expected_temperature)
+                <= params.peak_temp_range
+                for expected_temperature in params.targets.values()
+            )
+            for peak in peaks
+        )
+    )
     calls: list[MeltingCall] = []
     for output_target, expected_temperature in targets.items():
         candidates = [
@@ -157,17 +177,12 @@ def interpret_curve(
         observed = max(peaks, key=lambda peak: peak.deriv_rfu, default=None)
         compatible_targets = ()
         if best is None and observed is not None:
-            distances = {
-                candidate_target: abs(observed.temperature - candidate_temperature)
+            compatible_targets = tuple(
+                candidate_target
                 for candidate_target, candidate_temperature in params.targets.items()
-            }
-            nearest_distance = min(distances.values())
-            if nearest_distance <= 5:
-                compatible_targets = tuple(
-                    candidate_target
-                    for candidate_target, distance in distances.items()
-                    if distance == nearest_distance
-                )
+                if abs(observed.temperature - candidate_temperature)
+                <= params.peak_temp_range
+            )
         melting_incompatible = (
             target != PCRTargets.screening and cq_valid and best is None
         )
@@ -185,7 +200,11 @@ def interpret_curve(
                 ),
                 peak_temperature=(best or observed).temperature if (best or observed) else None,
                 peak_deriv_rfu=(best or observed).deriv_rfu if (best or observed) else None,
-                error="MELTING_INCOMPATIBLE" if melting_incompatible else None,
+                error=(
+                    "MELTING_INCOMPATIBLE"
+                    if melting_incompatible or screening_melting_incompatible
+                    else None
+                ),
                 compatible_targets=compatible_targets,
             )
         )

@@ -438,7 +438,7 @@ ejecución.
 
 ## Resultados base y efectivos
 
-- `v_pcr_current_result` conserva la selección y llamada derivadas;
+- `v_pcr_algorithmic_result` conserva la selección y llamada derivadas;
 - `v_pcr_effective_result` aplica la llamada manual activa y añade
   `has_override`;
 - `pcr_review_action` conserva toda la trazabilidad;

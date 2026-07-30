@@ -33,7 +33,6 @@ from .domain import (
     group_result_candidates,
     is_real_sample,
     overlap,
-    parse_cfx_datetime,
     sample_key,
     summarize_results,
     run_type_for_class,
@@ -48,6 +47,7 @@ from .models import (
     RunQC,
     TargetQC,
     TargetQCAssessment,
+    TargetQCEvidence,
     WellClassification,
 )
 from .repository import PCRAnalyticsRepository
@@ -135,9 +135,6 @@ class PCRAnalyticsPipeline:
         for run in self.repository.fetch_runs():
             targets = frozenset(canonical_target(target) for target in run.targets)
             run_class, review = classify_run(targets)
-            started_value = (
-                json.loads(run.started_json) if run.started_json is not None else None
-            )
             run_override = self._override(ReviewItemType.run, f"run:{run.run_id}")
             run_episode_key = episode_date_key(run.run_name)
             if run_override:
@@ -152,7 +149,7 @@ class PCRAnalyticsPipeline:
                     run_id=run.run_id,
                     run_class=run_class,
                     run_type=run_type_for_class(run_class),
-                    run_started=parse_cfx_datetime(started_value),
+                    run_started=run.run_started,
                     episode_key=run_episode_key,
                     targets=_json(sorted(targets)),
                     review=review,
@@ -165,27 +162,8 @@ class PCRAnalyticsPipeline:
 
         cq_by_well = {row.well_id: row for row in self.repository.fetch_cq_results()}
         curves = {row.well_id: row for row in self.repository.fetch_derivative_curves()}
-        failed_run_ids = {
-            row.run_id
-            for row in cq_by_well.values()
-            if canonical_target(row.target) == PCRTargets.fail
-        }
         inserts: list[InterpretationInsert] = []
         for well_id, cq_result in cq_by_well.items():
-            if cq_result.run_id in failed_run_ids:
-                inserts.append(
-                    _call_record(
-                        derivation_id,
-                        cq_result,
-                        MeltingCall(
-                            target=canonical_target(cq_result.target),
-                            call=ResultLevels.indeterminate,
-                            error="RUN FAILED",
-                        ),
-                        [],
-                    )
-                )
-                continue
             curve = curves.get(well_id)
             if curve is not None:
                 inserts.extend(
@@ -233,6 +211,7 @@ class PCRAnalyticsPipeline:
             by_run[observation.run_id].append(observation)
 
         targets: list[TargetQC] = []
+        evidence: list[TargetQCEvidence] = []
         qc_by_run: dict[int, list[TargetQCAssessment]] = defaultdict(list)
         for (run_id, target), observations in grouped.items():
             roles: dict[str, list[str]] = defaultdict(list)
@@ -244,25 +223,14 @@ class PCRAnalyticsPipeline:
                 and observation.error == "MELTING_INCOMPATIBLE"
                 for observation in observations
             )
-            if run_class == RunClasses.failed:
-                assessment = TargetQCAssessment(
-                    status="INVALID",
-                    valid=False,
-                    positive=0,
-                    negative=0,
-                    warnings=(),
-                    failures=("RUN_FAILED",),
-                    details={"run_failed": True},
+            assessment = (
+                evaluate_screening_target_qc(by_run[run_id])
+                if run_class == RunClasses.screening
+                else evaluate_target_qc(
+                    roles,
+                    positive_melting_incompatible=positive_melting_incompatible,
                 )
-            else:
-                assessment = (
-                    evaluate_screening_target_qc(by_run[run_id])
-                    if run_class == RunClasses.screening
-                    else evaluate_target_qc(
-                        roles,
-                        positive_melting_incompatible=positive_melting_incompatible,
-                    )
-                )
+            )
             qc_override = self._override(
                 ReviewItemType.target_qc,
                 f"run:{run_id}:target:{target}",
@@ -290,6 +258,18 @@ class PCRAnalyticsPipeline:
                 details=_json(details),
             )
             targets.append(item)
+            evidence.extend(
+                TargetQCEvidence(
+                    derivation_id=derivation_id,
+                    run_id=run_id,
+                    target=target,
+                    interpretation_id=observation.interpretation_id,
+                    well_role=observation.role,
+                )
+                for observation in observations
+                if observation.role
+                in {WellRoles.positive_control, WellRoles.negative_control}
+            )
             qc_by_run[run_id].append(assessment)
         runs = []
         for run_id, assessments in qc_by_run.items():
@@ -305,6 +285,7 @@ class PCRAnalyticsPipeline:
                 )
             )
         self.repository.insert_target_qc(targets)
+        self.repository.insert_target_qc_evidence(evidence)
         self.repository.insert_run_qc(runs)
         return len(targets)
 
@@ -325,8 +306,6 @@ class PCRAnalyticsPipeline:
         }
         candidates: list[tuple[int, str, str | None]] = []
         for run_id, run_class, date_key in run_rows:
-            if run_class == RunClasses.failed:
-                continue
             if run_id in manual_run_ids:
                 continue
             candidates.append((run_id, run_class, date_key))
@@ -526,7 +505,7 @@ def _call_record(
             {
                 "peak_count": len(peaks),
                 "melt_status": call.error or "MELTING_COMPATIBLE",
-                "compatible_targets_within_5c": list(call.compatible_targets),
+                "compatible_targets_within_window": list(call.compatible_targets),
             }
         ),
         error=call.error,

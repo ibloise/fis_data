@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -236,8 +237,8 @@ pcr_run = Table(
     Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
     Column("run_name", String(255), nullable=False),
     Column("run_name_normalized", String(255), nullable=False),
-    Column("run_started", String(255), nullable=True),
-    Column("run_ended", String(255), nullable=True),
+    Column("run_started", DateTime, nullable=True),
+    Column("run_ended", DateTime, nullable=True),
     Column("created_by_user", String(255), nullable=True),
     Column("base_serial_number", String(255), nullable=True),
     Column("optical_head_serial_number", String(255), nullable=True),
@@ -495,6 +496,30 @@ pcr_target_qc = Table(
     Column("details_json", Text, nullable=False),
 )
 
+pcr_target_qc_evidence = Table(
+    "pcr_target_qc_evidence",
+    metadata,
+    Column("derivation_id", Integer, primary_key=True),
+    Column("pcr_run_id", Integer, primary_key=True),
+    Column("canonical_target", String(100), primary_key=True),
+    Column(
+        "interpretation_id",
+        Integer,
+        ForeignKey("pcr_interpretation.interpretation_id"),
+        primary_key=True,
+    ),
+    Column("well_role", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["derivation_id", "pcr_run_id", "canonical_target"],
+        [
+            "pcr_target_qc.derivation_id",
+            "pcr_target_qc.pcr_run_id",
+            "pcr_target_qc.canonical_target",
+        ],
+        name="fk_pcr_target_qc_evidence_target_qc",
+    ),
+)
+
 pcr_run_qc = Table(
     "pcr_run_qc",
     metadata,
@@ -688,6 +713,7 @@ def create_schema(engine: Engine) -> None:
 
     metadata.create_all(engine)
     _upgrade_pcr_run_metadata(engine)
+    _normalize_pcr_run_datetimes(engine)
     _upgrade_pcr_run_type(engine)
     _upgrade_pcr_result_selection_run_type(engine)
     _upgrade_pcr_derivation_current(engine)
@@ -702,8 +728,8 @@ def _upgrade_pcr_run_metadata(engine: Engine) -> None:
 
     columns = {str(column["name"]) for column in inspect(engine).get_columns("pcr_run")}
     additions = {
-        "run_started": "VARCHAR(255)",
-        "run_ended": "VARCHAR(255)",
+        "run_started": "DATETIME",
+        "run_ended": "DATETIME",
         "created_by_user": "VARCHAR(255)",
         "base_serial_number": "VARCHAR(255)",
         "optical_head_serial_number": "VARCHAR(255)",
@@ -720,6 +746,25 @@ def _upgrade_pcr_run_metadata(engine: Engine) -> None:
         for name, sql_type in additions.items():
             if name not in columns:
                 conn.execute(text(f"ALTER TABLE pcr_run ADD COLUMN {name} {sql_type}"))
+
+
+def _normalize_pcr_run_datetimes(engine: Engine) -> None:
+    """Convert CFX month/day/year timestamps stored in legacy run metadata."""
+
+    with engine.begin() as conn:
+        for column in ("run_started", "run_ended"):
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE pcr_run
+                    SET {column} = datetime(
+                        substr({column}, 7, 4) || '-' || substr({column}, 1, 2) || '-' ||
+                        substr({column}, 4, 2) || ' ' || substr({column}, 12, 8)
+                    )
+                    WHERE {column} GLOB '??/??/???? ??:??:?? UTC'
+                    """
+                )
+            )
 
 
 def _upgrade_pcr_run_type(engine: Engine) -> None:
@@ -772,7 +817,7 @@ def create_views(engine: Engine) -> None:
         WHERE status='SUCCESS' AND is_current=1
     """
     views = {
-        "v_pcr_current_result": f"""
+        "v_pcr_algorithmic_result": f"""
             SELECT sample.sample_key, selection.run_type, selection.canonical_target,
                    interpretation.call, interpretation.cq,
                    interpretation.peak_temperature, interpretation.pcr_run_id,
@@ -838,6 +883,27 @@ def create_views(engine: Engine) -> None:
             JOIN pcr_run AS run ON run.pcr_run_id=run_qc.pcr_run_id
             WHERE run_qc.derivation_id=({current})
         """,
+        "v_pcr_target_qc_evidence": f"""
+            SELECT qc.pcr_run_id, run.run_name, qc.canonical_target,
+                   qc.qc_status, qc.is_valid,
+                   evidence.well_role, well.well, well.sample_name, well.content,
+                   interpretation.interpretation_id,
+                   interpretation.pcr_cq_result_id,
+                   interpretation.source_target, interpretation.call,
+                   interpretation.cq, interpretation.peak_temperature,
+                   interpretation.peak_deriv_rfu, interpretation.peaks_json,
+                   interpretation.metrics_json, interpretation.error
+            FROM pcr_target_qc_evidence AS evidence
+            JOIN pcr_target_qc AS qc
+              ON qc.derivation_id=evidence.derivation_id
+             AND qc.pcr_run_id=evidence.pcr_run_id
+             AND qc.canonical_target=evidence.canonical_target
+            JOIN pcr_interpretation AS interpretation
+              ON interpretation.interpretation_id=evidence.interpretation_id
+            JOIN pcr_well AS well ON well.pcr_well_id=interpretation.pcr_well_id
+            JOIN pcr_run AS run ON run.pcr_run_id=qc.pcr_run_id
+            WHERE evidence.derivation_id=({current})
+        """,
         "v_pcr_episodes": f"""
             SELECT episode.episode_key, episode.association_status,
                    episode_run.pcr_run_id, episode_run.run_role,
@@ -869,6 +935,7 @@ def create_views(engine: Engine) -> None:
         """,
     }
     with engine.begin() as conn:
+        conn.execute(text("DROP VIEW IF EXISTS v_pcr_current_result"))
         for name, select_sql in views.items():
             conn.execute(text(f"DROP VIEW IF EXISTS {name}"))
             conn.execute(text(f"CREATE VIEW {name} AS {select_sql}"))

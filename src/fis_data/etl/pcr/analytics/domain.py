@@ -112,43 +112,30 @@ def sample_key(value: str) -> str:
 def classify_run(targets: set[str] | frozenset[str]) -> tuple[str, str | None]:
     """Classify a run from its canonical target set."""
 
-    if PCRTargets.fail in targets:
-        return RunClasses.failed, "RUN FAILED"
-    if PCRTargets.screening in targets:
+    classified_targets = targets - {PCRTargets.fail, PCRTargets.fail_2}
+    if PCRTargets.screening in classified_targets:
         return RunClasses.screening, None
     if {
         PCRTargets.control_16s,
         PCRTargets.oxa48,
         PCRTargets.vim,
-    }.issubset(targets):
+    }.issubset(classified_targets):
         return RunClasses.panel_oxa48_vim, None
     if {
         PCRTargets.control_16s,
         PCRTargets.kpc,
         PCRTargets.ndm,
-    }.issubset(targets):
+    }.issubset(classified_targets):
         return RunClasses.panel_kpc_ndm, None
-    if targets & CARBAPENEMASE_TARGETS:
+    if classified_targets & CARBAPENEMASE_TARGETS:
         return RunClasses.compensation_partial, None
-    return RunClasses.other, f"Unrecognized target set: {sorted(targets)}"
+    return RunClasses.other, f"Unrecognized target set: {sorted(classified_targets)}"
 
 
 def run_type_for_class(run_class: str) -> str:
     """Map detailed analytical classes to the global result category."""
 
     return RunTypes.screening if run_class == RunClasses.screening else RunTypes.specific
-
-
-def parse_cfx_datetime(value: Any) -> str | None:
-    """Parse the CFX timestamp format into an ISO database value."""
-
-    if not value:
-        return None
-    try:
-        parsed = datetime.strptime(str(value), "%m/%d/%Y %H:%M:%S UTC")
-        return parsed.isoformat(sep=" ")
-    except ValueError:
-        return None
 
 
 def episode_date_key(run_name: str) -> str | None:
@@ -394,7 +381,11 @@ def evaluate_screening_target_qc(
         item.call == ResultLevels.negative for item in negative
     )
     if positive and not positive_control_positive:
-        failures.append(QCIssues.positive_control_not_positive)
+        failures.append(
+            QCIssues.positive_control_melting_incompatible
+            if any(item.error == "MELTING_INCOMPATIBLE" for item in positive)
+            else QCIssues.positive_control_not_positive
+        )
     if negative and not negative_control_negative:
         failures.append(QCIssues.negative_control_not_negative)
     return TargetQCAssessment(

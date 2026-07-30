@@ -149,11 +149,52 @@ def test_melting_handles_zero_curve_and_screening_multimodal() -> None:
     }
 
 
-def test_fail_target_marks_the_whole_run_as_failed() -> None:
-    assert classify_run(frozenset({canonical_target("FAIL-2"), "OXA48"})) == (
-        "FAILED",
-        "RUN FAILED",
+def test_screening_control_with_an_incompatible_peak_keeps_melting_trace() -> None:
+    calls, _ = interpret_curve(
+        source_target="Screening",
+        cq=20,
+        temperatures=[89.5, 90.0, 90.5],
+        derivatives=[0, 500, 0],
+        params=MeltingParameters(),
     )
+    observations = [
+        QCObservation(
+            1,
+            call.target,
+            "Screening",
+            "SCREENING",
+            "POSITIVE_CONTROL",
+            call.call,
+            20,
+            call.error,
+        )
+        for call in calls
+    ] + [
+        _screening_qc_observation("KPC", "NEGATIVE_CONTROL", "NEGATIVE", 25)
+    ]
+
+    assert {call.error for call in calls} == {"MELTING_INCOMPATIBLE"}
+    assessment = evaluate_screening_target_qc(observations)
+    assert assessment.failures == ("POSITIVE_CONTROL_MELTING_INCOMPATIBLE",)
+
+
+def test_fail_target_only_invalidates_its_own_interpretation() -> None:
+    assert classify_run(frozenset({canonical_target("FAIL-2"), "OXA48"})) == (
+        "COMPENSATION_PARTIAL",
+        None,
+    )
+    calls, peaks = interpret_curve(
+        source_target="FAIL-2",
+        cq=21.2,
+        temperatures=[],
+        derivatives=[],
+        params=MeltingParameters(),
+    )
+
+    assert peaks == []
+    assert calls[0].target == "FAIL"
+    assert calls[0].call == "INDETERMINATE"
+    assert calls[0].error == "TARGET FAILED"
 
 
 def test_specific_target_preserves_cq_as_indeterminate_on_melting_mismatch() -> None:
@@ -170,6 +211,20 @@ def test_specific_target_preserves_cq_as_indeterminate_on_melting_mismatch() -> 
     assert calls[0].error == "MELTING_INCOMPATIBLE"
     assert calls[0].peak_temperature == 82.5
     assert calls[0].compatible_targets == ("VIM",)
+
+
+def test_melting_compatibility_uses_the_configured_half_degree_window() -> None:
+    calls, _ = interpret_curve(
+        source_target="KPC",
+        cq=21.0,
+        temperatures=[89.5, 90.0, 90.5],
+        derivatives=[0, 500, 0],
+        params=MeltingParameters(),
+    )
+
+    assert calls[0].call == "INDETERMINATE"
+    assert calls[0].error == "MELTING_INCOMPATIBLE"
+    assert calls[0].compatible_targets == ()
 
 
 def test_numeric_sample_keys_preserve_leading_zeroes() -> None:
@@ -605,6 +660,17 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
                 """
             )
         ).one()
+        qc_evidence = conn.execute(
+            text(
+                """
+                SELECT well_role, call, cq, peak_temperature, error
+                FROM v_pcr_target_qc_evidence
+                WHERE pcr_run_id=:run_id AND canonical_target='KPC'
+                ORDER BY well_role
+                """
+            ),
+            {"run_id": pcr_run_id},
+        ).all()
 
     assert classifications == [
         ("00123", "REAL_SAMPLE"),
@@ -614,6 +680,10 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
     ]
     assert target_qc == ("INVALID", 0)
     assert selection == ("00123", None, "NO_VALID_RESULT", 1)
+    assert qc_evidence == [
+        ("NEGATIVE_CONTROL", "POSITIVE", 20.0, 88.0, None),
+        ("POSITIVE_CONTROL", "POSITIVE", 20.0, 88.0, None),
+    ]
 
     review_service = PCRReviewService(PCRReviewRepository(engine))
     review_items = review_service.list_items(limit=20)

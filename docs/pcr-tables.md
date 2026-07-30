@@ -36,10 +36,10 @@ El modelo tiene tres capas:
 | Capa | Tablas |
 | --- | --- |
 | Evidencia materializada | `pcr_run`, `pcr_run_file`, `pcr_run_attribute`, `pcr_well`, `pcr_cq_result`, `pcr_rfu_measurement` |
-| Analítica derivada | `pcr_derivation_run`, `pcr_sample`, `pcr_well_classification`, `pcr_run_analysis`, `pcr_interpretation`, `pcr_target_qc`, `pcr_run_qc`, `pcr_episode`, `pcr_episode_run`, `pcr_result_selection` |
+| Analítica derivada | `pcr_derivation_run`, `pcr_sample`, `pcr_well_classification`, `pcr_run_analysis`, `pcr_interpretation`, `pcr_target_qc`, `pcr_target_qc_evidence`, `pcr_run_qc`, `pcr_episode`, `pcr_episode_run`, `pcr_result_selection` |
 | Revisión y auditoría | `pcr_review_action` |
 
-En total hay **17 tablas físicas PCR** y **6 vistas públicas PCR**.
+En total hay **18 tablas físicas PCR** y **7 vistas públicas PCR**.
 
 ```mermaid
 flowchart LR
@@ -55,6 +55,8 @@ flowchart LR
     D --> RA["pcr_run_analysis"]
     D --> I["pcr_interpretation"]
     D --> TQC["pcr_target_qc"]
+    TQC --> TQCE["pcr_target_qc_evidence"]
+    I --> TQCE
     D --> RQC["pcr_run_qc"]
     D --> EP["pcr_episode"]
     D --> RS["pcr_result_selection"]
@@ -151,7 +153,7 @@ amplificación y curvas de melting— se agrupan en el mismo run mediante el val
 | `source_id` | Integer, FK → `ctl_source.source_id` | No | Fuente lógica a la que pertenece. |
 | `run_name` | String(255) | No | Nombre original obtenido de `File Name`. |
 | `run_name_normalized` | String(255) | No | Nombre normalizado para emparejar ficheros. |
-| `run_started` / `run_ended` | String(255) | Sí | Fechas de inicio y fin reportadas por CFX. |
+| `run_started` / `run_ended` | DateTime | Sí | Fechas de inicio y fin CFX normalizadas. |
 | `created_by_user` | String(255) | Sí | Usuario que creó el run en CFX. |
 | `base_serial_number` / `optical_head_serial_number` | String(255) | Sí | Números de serie del equipo. |
 | `cfx_maestro_version` | String(255) | Sí | Versión de CFX Maestro. |
@@ -409,8 +411,6 @@ Clasificación y metadatos analíticos de un run para una derivación.
 
 Clases implementadas:
 
-- `FAILED`: algún target de origen contiene el texto `FAIL`; el motivo es
-  `RUN FAILED`;
 - `SCREENING`: contiene la diana `Screening`;
 - `PANEL_OXA48_VIM`: contiene al menos `16S`, `OXA48` y `VIM`;
 - `PANEL_KPC_NDM`: contiene al menos `16S`, `KPC` y `NDM`;
@@ -421,11 +421,10 @@ Clases implementadas:
 `run_type` separa los resultados de cribado (`SCREENING`) de los ensayos de
 panel o específicos (`SPECIFIC`), sin perder la clase detallada en
 `run_class`. Solo los runs cuya clase sea `SCREENING` pertenecen al primer
-tipo; todos los demás, incluido `FAILED`, pertenecen a `SPECIFIC`.
+tipo; todos los demás pertenecen a `SPECIFIC`.
 
 `run_started` espera el formato CFX `%m/%d/%Y %H:%M:%S UTC`. La fecha de
 episodio se busca en el nombre como 6 u 8 dígitos en orden día-mes-año.
-Los runs `FAILED` no participan en asociaciones de episodios.
 
 ### `pcr_interpretation`
 
@@ -461,10 +460,12 @@ falta la curva derivada, las dianas que la requieren producen `ERROR`.
 Para una diana específica, un Cq válido con pico de melting fuera de la ventana
 de la diana no se convierte en negativo: queda `INDETERMINATE` con
 `error = 'MELTING_INCOMPATIBLE'`. El Cq y el pico observado se preservan, y
-`metrics_json.compatible_targets_within_5c` registra la diana más cercana si
-está a ±5 °C; una lista vacía indica un pico indeterminado. Un run cuyo target
-contenga `FAIL` anula todas sus interpretaciones con `INDETERMINATE` y
-`error = 'RUN FAILED'`.
+`metrics_json.compatible_targets_within_window` registra las dianas cuya
+temperatura esperada está dentro de la ventana configurada (actualmente ±0.5
+°C); una lista vacía indica que el pico no es compatible con ninguna diana. Una fila cuyo
+target de origen contenga `FAIL` queda aislada como `INDETERMINATE`, con
+`error = 'TARGET FAILED'`; no invalida las demás muestras, dianas, QC ni la
+clasificación del run.
 
 ### `pcr_target_qc`
 
@@ -490,8 +491,7 @@ aplicar también `VALID_WITH_WARNINGS`.
 Incidencias posibles: `MISSING_POSITIVE_CONTROL`,
 `MISSING_NEGATIVE_CONTROL`, `POSITIVE_CONTROL_NOT_POSITIVE`,
 `POSITIVE_CONTROL_MELTING_INCOMPATIBLE`, `NEGATIVE_CONTROL_POSITIVE`,
-`NEGATIVE_CONTROL_NOT_NEGATIVE`, `NEGATIVE_CONTROL_INDETERMINATE` y
-`RUN_FAILED`.
+`NEGATIVE_CONTROL_NOT_NEGATIVE` y `NEGATIVE_CONTROL_INDETERMINATE`.
 
 `POSITIVE_CONTROL_MELTING_INCOMPATIBLE` distingue un control que amplificó
 (Cq válido) pero cuyo pico no corresponde a la diana esperada de un control
@@ -500,7 +500,28 @@ en la interpretación asociada.
 
 En Screening los controles son globales: al menos una llamada del control
 positivo debe ser positiva y todas las llamadas del control negativo deben ser
-negativas.
+negativas. Si un control positivo amplifica pero todos sus picos quedan fuera
+de las ventanas de las dianas Screening, se registra
+`POSITIVE_CONTROL_MELTING_INCOMPATIBLE` en lugar de
+`POSITIVE_CONTROL_NOT_POSITIVE`.
+
+### `pcr_target_qc_evidence`
+
+Trazabilidad persistida de cada interpretación de control incluida en la
+evaluación de un QC run–diana. No contiene agregados: enlaza el QC con la
+interpretación concreta que aporta Cq, melting, pico y error.
+
+| Columna | Tipo | Nulo | Significado |
+| --- | --- | --- | --- |
+| `derivation_id` | Integer, PK/FK → `pcr_derivation_run` | No | Derivación. |
+| `pcr_run_id` | Integer, PK | No | Run evaluado. |
+| `canonical_target` | String(100), PK | No | Diana del QC. |
+| `interpretation_id` | Integer, PK, FK → `pcr_interpretation` | No | Interpretación de control usada. |
+| `well_role` | String(40) | No | `POSITIVE_CONTROL` o `NEGATIVE_CONTROL`. |
+
+La clave `(derivation_id, pcr_run_id, canonical_target)` referencia a
+`pcr_target_qc`. Una misma interpretación de control puede ser evidencia de
+varios targets en un run de Screening.
 
 ### `pcr_run_qc`
 
@@ -651,7 +672,7 @@ Las vistas se recrean al finalizar el pipeline y se limitan, salvo la lógica
 de overrides indicada, a la derivación marcada simultáneamente como
 `status = 'SUCCESS'` e `is_current = 1`.
 
-### `v_pcr_current_result`
+### `v_pcr_algorithmic_result`
 
 Una fila por muestra–diana seleccionada. Expone:
 
@@ -663,7 +684,7 @@ La llamada es la puramente derivada de `preferred_interpretation_id`.
 
 ### `v_pcr_effective_result`
 
-Tiene las mismas columnas de resultado que `v_pcr_current_result` y añade
+Tiene las mismas columnas de resultado que `v_pcr_algorithmic_result` y añade
 `has_override`. Para cada sujeto `RESULT`, toma el último evento
 `OVERRIDE`/`REVOKE`; si el último es `OVERRIDE`, sustituye `call` por
 `payload_json.call`. No oculta el resto de la evidencia analítica.
@@ -680,6 +701,13 @@ preferida. Expone:
 
 Expone todas las columnas de `pcr_run_qc` de la derivación vigente y añade
 `run_name`.
+
+### `v_pcr_target_qc_evidence`
+
+Expone la evidencia de controles de la derivación vigente. Parte de
+`pcr_target_qc_evidence` y añade el estado QC, nombre del run, pozo, `Sample`,
+`Content`, llamada, Cq, pico de melting, métricas, error e IDs de
+interpretación y Cq. Permite perseguir un QC directamente hasta su evidencia.
 
 ### `v_pcr_episodes`
 
@@ -730,12 +758,13 @@ El código vacía, en este orden:
 2. `pcr_episode_run`;
 3. `pcr_episode`;
 4. `pcr_run_qc`;
-5. `pcr_target_qc`;
-6. `pcr_interpretation`;
-7. `pcr_run_analysis`;
-8. `pcr_well_classification`;
-9. `pcr_sample`;
-10. `pcr_derivation_run`.
+5. `pcr_target_qc_evidence`;
+6. `pcr_target_qc`;
+7. `pcr_interpretation`;
+8. `pcr_run_analysis`;
+9. `pcr_well_classification`;
+10. `pcr_sample`;
+11. `pcr_derivation_run`.
 
 No borra las seis tablas de evidencia ni `pcr_review_action`.
 
@@ -744,7 +773,7 @@ No borra las seis tablas de evidencia ni `pcr_review_action`.
 - Para consumo ordinario conviene usar las vistas en lugar de reconstruir a
   mano cuál es la derivación vigente.
 - Para la llamada final operativa debe preferirse `v_pcr_effective_result`; la
-  vista `v_pcr_current_result` conserva deliberadamente la salida algorítmica.
+  vista `v_pcr_algorithmic_result` conserva deliberadamente la salida algorítmica.
 - La validez para selección es `pcr_target_qc.is_valid`, no solo el texto
   `qc_status`.
 - `preferred_interpretation_id` puede ser nulo: una fila de selección también

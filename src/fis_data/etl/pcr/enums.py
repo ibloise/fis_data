@@ -82,7 +82,6 @@ class ClassificationRules(StrEnum):
 
 
 class RunClasses(StrEnum):
-    failed = "FAILED"
     screening = "SCREENING"
     panel_oxa48_vim = "PANEL_OXA48_VIM"
     panel_kpc_ndm = "PANEL_KPC_NDM"
@@ -104,7 +103,6 @@ class QCStatuses(StrEnum):
 
 
 class QCIssues(StrEnum):
-    run_failed = "RUN_FAILED"
     missing_positive_control = "MISSING_POSITIVE_CONTROL"
     missing_negative_control = "MISSING_NEGATIVE_CONTROL"
     positive_control_not_positive = "POSITIVE_CONTROL_NOT_POSITIVE"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class SourceRun:
 
     run_id: int
     run_name: str
-    started_json: str | None
+    run_started: datetime | None
     targets: frozenset[str]
 
 
@@ -47,7 +48,7 @@ class RunAnalysis:
     run_id: int
     run_class: str
     run_type: str
-    run_started: str | None
+    run_started: datetime | None
     episode_key: str | None
     targets: str
     review: str | None
@@ -104,6 +105,7 @@ class QCObservation:
     call: str
     cq: float | None
     error: str | None = None
+    interpretation_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,17 @@ class TargetQC:
     negative: int
     warnings: str
     details: str
+
+
+@dataclass(frozen=True)
+class TargetQCEvidence:
+    """One control interpretation included in a target QC assessment."""
+
+    derivation_id: int
+    run_id: int
+    target: str
+    interpretation_id: int
+    well_role: str
 
 
 @dataclass(frozen=True)

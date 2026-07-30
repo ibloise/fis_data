@@ -691,10 +691,20 @@ def _refresh_run_metadata(conn: Connection, *, pcr_run_id: int) -> None:
         text(
             """
             UPDATE pcr_run
-            SET run_started=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                             WHERE pcr_run_id=:id AND attribute_key_normalized='run_started' AND is_canonical=1),
-                run_ended=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
-                           WHERE pcr_run_id=:id AND attribute_key_normalized='run_ended' AND is_canonical=1),
+            SET run_started=(SELECT datetime(
+                                substr(json_extract(value_json, '$'), 7, 4) || '-' ||
+                                substr(json_extract(value_json, '$'), 1, 2) || '-' ||
+                                substr(json_extract(value_json, '$'), 4, 2) || ' ' ||
+                                substr(json_extract(value_json, '$'), 12, 8)
+                              ) FROM pcr_run_attribute
+                              WHERE pcr_run_id=:id AND attribute_key_normalized='run_started' AND is_canonical=1),
+                run_ended=(SELECT datetime(
+                              substr(json_extract(value_json, '$'), 7, 4) || '-' ||
+                              substr(json_extract(value_json, '$'), 1, 2) || '-' ||
+                              substr(json_extract(value_json, '$'), 4, 2) || ' ' ||
+                              substr(json_extract(value_json, '$'), 12, 8)
+                            ) FROM pcr_run_attribute
+                            WHERE pcr_run_id=:id AND attribute_key_normalized='run_ended' AND is_canonical=1),
                 created_by_user=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute
                                  WHERE pcr_run_id=:id AND attribute_key_normalized='created_by_user' AND is_canonical=1),
                 base_serial_number=(SELECT json_extract(value_json, '$') FROM pcr_run_attribute

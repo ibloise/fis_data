@@ -319,7 +319,7 @@ def test_run_override_is_consumed_by_analytics_pipeline() -> None:
         SourceRun(
             run_id=8,
             run_name="UNKNOWN",
-            started_json=None,
+            run_started=None,
             targets=frozenset(),
         )
     ]

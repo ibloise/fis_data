@@ -106,13 +106,15 @@ QC is target-specific for panel assays. For Screening assays, controls are
 global: at least one positive-control call must be positive, and every
 negative-control call must be negative.
 
-Current analytical results are exposed through `v_pcr_current_result`,
+Current analytical results are exposed through `v_pcr_algorithmic_result`,
 `v_pcr_result_history`, `v_pcr_run_qc`, `v_pcr_episodes`, and
 `v_pcr_review_queue`.
 
 The complete data dictionary for the 17 physical `pcr_*` tables and the public
 `v_pcr_*` views is available in
 [`docs/pcr-tables.md`](docs/pcr-tables.md).
+Functional decisions that affect PCR interpretation are recorded in
+[`docs/pcr-decisions.md`](docs/pcr-decisions.md).
 
 ## PCR Analytical Review
 
