@@ -11,6 +11,7 @@ from fis_data.etl.pcr.analytics.domain import (
     classify_run,
     classify_sample_name,
     evaluate_screening_target_qc,
+    evaluate_target_qc,
     group_result_candidates,
     sample_key,
     summarize_results,
@@ -406,6 +407,21 @@ def test_screening_qc_rejects_a_non_negative_negative_control() -> None:
 
     assert not assessment.valid
     assert assessment.failures == ("NEGATIVE_CONTROL_NOT_NEGATIVE",)
+
+
+def test_16s_positive_negative_control_is_valid_with_a_warning() -> None:
+    assessment = evaluate_target_qc(
+        {
+            "POSITIVE_CONTROL": ["POSITIVE"],
+            "NEGATIVE_CONTROL": ["POSITIVE"],
+        },
+        target="16S",
+    )
+
+    assert assessment.valid
+    assert assessment.status == "WARNING"
+    assert assessment.failures == ()
+    assert assessment.warnings == ("NEGATIVE_CONTROL_POSITIVE",)
 
 
 def test_partial_overlap_panel_runs_do_not_pair_across_different_dates() -> None:

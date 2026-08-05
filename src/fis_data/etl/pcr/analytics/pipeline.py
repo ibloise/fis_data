@@ -228,6 +228,7 @@ class PCRAnalyticsPipeline:
                 if run_class == RunClasses.screening
                 else evaluate_target_qc(
                     roles,
+                    target=target,
                     positive_melting_incompatible=positive_melting_incompatible,
                 )
             )

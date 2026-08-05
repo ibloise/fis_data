@@ -314,7 +314,10 @@ def group_result_candidates(
 
 
 def evaluate_target_qc(
-    roles: dict[str, list[str]], *, positive_melting_incompatible: bool = False
+    roles: dict[str, list[str]],
+    *,
+    target: str,
+    positive_melting_incompatible: bool = False,
 ) -> TargetQCAssessment:
     """Evaluate positive and negative control calls for one target."""
 
@@ -333,7 +336,12 @@ def evaluate_target_qc(
             else QCIssues.positive_control_not_positive
         )
     if any(call == ResultLevels.positive for call in negative):
-        failures.append(QCIssues.negative_control_positive)
+        # 16S is a specimen-process control: a positive negative-control signal
+        # is retained for review but does not invalidate the analytical target.
+        destination = (
+            warnings if target == PCRTargets.control_16s else failures
+        )
+        destination.append(QCIssues.negative_control_positive)
     if any(call == ResultLevels.indeterminate for call in negative):
         warnings.append(QCIssues.negative_control_indeterminate)
     return TargetQCAssessment(
