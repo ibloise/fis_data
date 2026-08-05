@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FIS · PCR review</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div><span class="eyebrow">FIS DATA</span><h1>PCR analytical review</h1></div>
+      <p id="connection-status">Connecting…</p>
+    </header>
+    <main>
+      <section class="panel run-picker">
+        <label for="run-search">PCR run</label>
+        <div class="picker-row">
+          <input id="run-search" type="search" placeholder="Search by filename">
+          <select id="run-select" aria-label="PCR run"></select>
+        </div>
+        <p id="run-summary" class="muted">Select a run to inspect quality and curves.</p>
+      </section>
+
+      <nav class="tabs" aria-label="PCR review sections">
+        <button class="tab active" data-panel="quality">Quality controls</button>
+        <button class="tab" data-panel="curves">Curves</button>
+      </nav>
+
+      <section id="quality" class="workspace active">
+        <div class="section-heading">
+          <div><span class="eyebrow">QC</span><h2>Target quality controls</h2></div>
+          <p class="muted">Select a row to display the control evidence.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Target</th><th>Status</th><th>Positive</th><th>Negative</th><th>Issues</th></tr></thead>
+            <tbody id="qc-table-body"><tr><td colspan="5" class="muted">No run selected.</td></tr></tbody>
+          </table>
+        </div>
+        <section class="evidence panel-subtle">
+          <div class="section-heading compact"><h3>Control evidence</h3><p id="evidence-title" class="muted">Choose a target.</p></div>
+          <div id="evidence-content" class="evidence-grid muted">No evidence selected.</div>
+        </section>
+      </section>
+
+      <section id="curves" class="workspace">
+        <div class="section-heading">
+          <div><span class="eyebrow">SIGNAL</span><h2>Amplification and melting curves</h2></div>
+          <p class="muted">Every displayed target has a consistent colour.</p>
+        </div>
+        <div class="curve-controls">
+          <label>Curve<select id="curve-kind"><option value="amplification">Ct / Cq amplification</option><option value="melting">Melting derivative</option></select></label>
+          <label>Sample<select id="sample-filter"><option value="">All samples</option></select></label>
+          <label>Target<select id="target-filter"><option value="">All targets</option></select></label>
+        </div>
+        <div class="chart-shell"><svg id="curve-chart" viewBox="0 0 960 460" role="img" aria-label="PCR curve chart"></svg><p id="chart-empty" class="muted">Select a run to draw curves.</p></div>
+        <div id="chart-legend" class="legend"></div>
+      </section>
+    </main>
+    <template id="evidence-card-template"><article class="evidence-card"><strong></strong><span></span><dl></dl></article></template>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>

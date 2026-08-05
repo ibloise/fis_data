@@ -7,6 +7,7 @@ import json
 import sys
 from collections.abc import Iterator
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from zipfile import is_zipfile
 
@@ -27,6 +28,7 @@ from .etl.microb_parse_job import MicrobParseJob
 from .etl.pcr.analytics import PCRAnalyticsJob
 from .etl.pcr.review.cli import pcr_review
 from .schema import create_schema
+from .web import create_app
 
 
 @click.group()
@@ -46,6 +48,19 @@ def _engine_for_db_path(db_path: str | None) -> Engine:
     path = Path(db_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     return get_engine(DBSettings(url=sqlite_url_for_path(path)))
+
+
+@cli.command("serve")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8000, show_default=True, type=int)
+@click.option("--db-path", type=click.Path(dir_okay=False))
+def serve(host: str, port: int, db_path: str | None) -> None:
+    """Serve the PCR review frontend and read-only API."""
+
+    import uvicorn
+
+    database_url = sqlite_url_for_path(db_path) if db_path else None
+    uvicorn.run(create_app(database_url=database_url), host=host, port=port)
 
 
 def _expand_input_paths(
@@ -658,11 +673,18 @@ def materialize(
     is_flag=True,
     help="Run the derivation without active PCR review overrides.",
 )
+@click.option(
+    "--experimental-before",
+    type=click.DateTime(formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]),
+    help="Mark runs before this timestamp EXPERIMENTAL during this derivation. "
+    "Defaults to PCR_EXPERIMENTAL_BEFORE when configured.",
+)
 def derive_pcr(
     db_path: str | None,
     algorithm_version: str,
     rebuild: bool,
     ignore_overrides: bool,
+    experimental_before: datetime | None,
 ) -> None:
     """Build the versioned PCR analytical and QC model."""
 
@@ -675,6 +697,7 @@ def derive_pcr(
             algorithm_version=algorithm_version,
             rebuild=rebuild,
             ignore_overrides=ignore_overrides,
+            experimental_before=experimental_before,
         )
     except Exception as exc:
         finish_run(
@@ -700,7 +723,6 @@ def derive_pcr(
         err=True,
     )
     click.echo(json.dumps(details, ensure_ascii=False, indent=2))
-
 
 @cli.command("parse-microb")
 @click.option(

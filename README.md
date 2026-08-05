@@ -116,6 +116,18 @@ The complete data dictionary for the 17 physical `pcr_*` tables and the public
 Functional decisions that affect PCR interpretation are recorded in
 [`docs/pcr-decisions.md`](docs/pcr-decisions.md).
 
+## PCR Review Frontend
+
+Start the read-only FastAPI application against the local database:
+
+```bash
+fis-data serve --db-path var/fis_data.sqlite
+```
+
+Open `http://127.0.0.1:8000` to review target QC and inspect amplification
+(Cq/Ct) or melting curves by run, sample, and target. The browser uses the
+same-origin `/api/pcr/*` endpoints; targets are rendered with stable colours.
+
 ## PCR Analytical Review
 
 La guía completa de conceptos, comandos, overrides y flujo operativo está en
