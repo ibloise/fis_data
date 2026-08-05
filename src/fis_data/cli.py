@@ -25,6 +25,8 @@ from .etl.ingest_text import ingest_text_file
 from .etl.materialization import MaterializationJob
 from .etl.materialization_registry import get_entity_materializer
 from .etl.microb_parse_job import MicrobParseJob
+from .etl.microb_catalogs import MicrobCatalogRepository
+from .etl.microb_staging_job import MicrobStagingJob
 from .etl.pcr.analytics import PCRAnalyticsJob
 from .etl.pcr.review.cli import pcr_review
 from .schema import create_schema
@@ -723,6 +725,71 @@ def derive_pcr(
         err=True,
     )
     click.echo(json.dumps(details, ensure_ascii=False, indent=2))
+
+
+@cli.command("materialize-microb")
+@click.option("--db-path", type=click.Path(dir_okay=False), help="SQLite database path.")
+@click.option("--entity", "entity_name", default="microb", show_default=True)
+@click.option("--file-id", type=int, help="Materialize only one parsed Microb file.")
+def materialize_microb(
+    db_path: str | None, entity_name: str, file_id: int | None
+) -> None:
+    """Materialize parsed Microb text payloads into staging tables."""
+
+    engine = _engine_for_db_path(db_path)
+    create_schema(engine)
+    job = MicrobStagingJob(engine)
+    file_ids = [file_id] if file_id is not None else job.repository.parsed_file_ids(
+        entity_name=entity_name
+    )
+    if not file_ids:
+        click.echo(
+            "No parsed Microb files found. Run parse-microb first or provide "
+            "the matching --entity.",
+            err=True,
+        )
+        click.echo("[]")
+        return
+    run_id = start_run(engine, pipeline_name="materialize:microb")
+    results = []
+    failed = False
+    for candidate_file_id in file_ids:
+        result = job.run(
+            ctx=JobContext(
+                entity_name=entity_name,
+                file_id=candidate_file_id,
+                run_id=run_id,
+            )
+        )
+        results.append({"file_id": candidate_file_id, "ok": result.ok, **result.metrics})
+        failed = failed or not result.ok
+    finish_run(
+        engine,
+        run_id=run_id,
+        status=RunStatus.FAILED if failed else RunStatus.SUCCESS,
+        details_json=json.dumps({"entity_name": entity_name, "files": results}),
+    )
+    click.echo(json.dumps(results, ensure_ascii=False, indent=2))
+    if failed:
+        raise SystemExit(1)
+
+
+@cli.command("load-microb-catalogs")
+@click.option("--db-path", type=click.Path(dir_okay=False), help="SQLite database path.")
+@click.option(
+    "--catalog-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="Directory containing pipe-delimited Microb catalog files.",
+)
+def load_microb_catalogs(db_path: str | None, catalog_dir: Path) -> None:
+    """Load versioned Microb reference catalogs for later normalization."""
+
+    engine = _engine_for_db_path(db_path)
+    create_schema(engine)
+    stats = MicrobCatalogRepository(engine).load_directory(catalog_dir)
+    click.echo(json.dumps([asdict(item) for item in stats], ensure_ascii=False, indent=2))
+
 
 @cli.command("parse-microb")
 @click.option(

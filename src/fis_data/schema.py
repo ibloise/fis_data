@@ -137,6 +137,109 @@ raw_excel_rows = Table(
     ),
 )
 
+stg_microb_technique = Table(
+    "stg_microb_technique",
+    metadata,
+    Column("stg_microb_technique_id", Integer, primary_key=True, autoincrement=True),
+    Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
+    Column("run_id", Integer, ForeignKey("ctl_etl_run.run_id"), nullable=False),
+    Column("file_id", Integer, ForeignKey("ctl_file_registry.file_id"), nullable=False),
+    Column("line_id", Integer, ForeignKey("raw_text_lines.line_id"), nullable=False),
+    Column("line_no", Integer, nullable=False),
+    Column("nhc", String(32)),
+    Column("afi", String(32)),
+    Column("sexo", String(8)),
+    Column("fec_nacimiento_raw", String(32)),
+    Column("nombre", String(255)),
+    Column("apellido1", String(255)),
+    Column("apellido2", String(255)),
+    Column("num_muestra", String(32)),
+    Column("aislamiento", String(16)),
+    Column("cod_muestra", String(32)),
+    Column("cod_localizacion", String(32)),
+    Column("cod_procedencia", String(32)),
+    Column("cod_servicio", String(32)),
+    Column("planta", String(64)),
+    Column("habitacion", String(64)),
+    Column("box", String(32)),
+    Column("fec_recep_raw", String(32)),
+    Column("hora_recep_raw", String(32)),
+    Column("fec_entrada_raw", String(32)),
+    Column("hora_entrada_raw", String(32)),
+    Column("fec_resultado_raw", String(32)),
+    Column("hora_resultado_raw", String(32)),
+    Column("cod_sig", String(32)),
+    Column("cod_analisis", String(32)),
+    Column("cod_resultado", String(32)),
+    Column("cod_microorganismo", String(32)),
+    Column("cod_recuento", String(32)),
+    Column("cod_result_cualitativo", String(32)),
+    Column("cod_result_cuantitativo", String(32)),
+    Column("cod_tecnica", String(32)),
+    Column("cod_obs", String(32)),
+    Column("cod_obs_2", String(32)),
+    Column("cod_observaciones", String(32)),
+    Column("cod_observaciones_2", String(32)),
+    Column("cod_diagnostico", String(32)),
+    Column("cod_recr", String(32)),
+    Column("cod_firma", String(32)),
+    Column("loaded_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("file_id", "line_id", name="uq_stg_microb_technique_file_line"),
+)
+
+stg_microb_antibiogram = Table(
+    "stg_microb_antibiogram",
+    metadata,
+    Column("stg_microb_antibiogram_id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "stg_microb_technique_id",
+        Integer,
+        ForeignKey("stg_microb_technique.stg_microb_technique_id"),
+        nullable=False,
+    ),
+    Column("file_id", Integer, ForeignKey("ctl_file_registry.file_id"), nullable=False),
+    Column("line_id", Integer, ForeignKey("raw_text_lines.line_id"), nullable=False),
+    Column("seq_no", Integer, nullable=False),
+    Column("cod_atb", String(16), nullable=False),
+    Column("cod_cmi", String(32)),
+    Column("cod_int", String(8)),
+    Column("des_cmi", String(64)),
+    Column("loaded_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("file_id", "line_id", "seq_no", name="uq_stg_microb_atb_file_line_seq"),
+)
+
+ref_microb_catalog = Table(
+    "ref_microb_catalog",
+    metadata,
+    Column("ref_microb_catalog_id", Integer, primary_key=True, autoincrement=True),
+    Column("catalog_name", String(100), nullable=False),
+    Column("source_path", String(1024), nullable=False),
+    Column("sha256", String(64), nullable=False),
+    Column("entry_count", Integer, nullable=False),
+    Column("is_current", Boolean, nullable=False, server_default=text("0")),
+    Column("loaded_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("catalog_name", "sha256", name="uq_ref_microb_catalog_name_sha"),
+)
+
+ref_microb_catalog_entry = Table(
+    "ref_microb_catalog_entry",
+    metadata,
+    Column("ref_microb_catalog_entry_id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "ref_microb_catalog_id",
+        Integer,
+        ForeignKey("ref_microb_catalog.ref_microb_catalog_id"),
+        nullable=False,
+    ),
+    Column("code", String(100), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("aliases_json", Text, nullable=False),
+    Column("raw_fields_json", Text, nullable=False),
+    UniqueConstraint(
+        "ref_microb_catalog_id", "code", name="uq_ref_microb_catalog_entry_code"
+    ),
+)
+
 ctl_excel_parse_file = Table(
     "ctl_excel_parse_file",
     metadata,
@@ -652,6 +755,14 @@ Index(
     raw_text_lines.c.run_id,
 )
 Index("idx_raw_text_file_line", raw_text_lines.c.file_id, raw_text_lines.c.line_no)
+Index("idx_stg_microb_technique_file", stg_microb_technique.c.file_id)
+Index("idx_stg_microb_technique_nhc", stg_microb_technique.c.nhc)
+Index("idx_stg_microb_technique_sample", stg_microb_technique.c.num_muestra)
+Index("idx_stg_microb_technique_microorganism", stg_microb_technique.c.cod_microorganismo)
+Index("idx_stg_microb_antibiogram_technique", stg_microb_antibiogram.c.stg_microb_technique_id)
+Index("idx_stg_microb_antibiogram_antibiotic", stg_microb_antibiogram.c.cod_atb)
+Index("idx_ref_microb_catalog_current", ref_microb_catalog.c.catalog_name, ref_microb_catalog.c.is_current)
+Index("idx_ref_microb_catalog_entry_code", ref_microb_catalog_entry.c.code)
 Index(
     "idx_raw_excel_source_entity_run",
     raw_excel_rows.c.source_id,
