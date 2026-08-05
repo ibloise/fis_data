@@ -81,7 +81,7 @@ def _value(payload: dict[str, Any], key: str) -> str | None:
 
 def _technique_row(row: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     fields = {
-        "nhc": "NºHistoria", "afi": "AFI", "sexo": "Sexo",
+        "nhc": "nºhistoria", "afi": "afi", "sexo": "Sexo",
         "fec_nacimiento_raw": "Fec.Nacimiento", "nombre": "Nombre",
         "apellido1": "Apellido1", "apellido2": "Apellido2",
         "num_muestra": "NºMuestra", "aislamiento": "Aislamiento",

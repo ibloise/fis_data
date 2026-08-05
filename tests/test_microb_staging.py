@@ -49,7 +49,8 @@ def test_microb_staging_materializes_techniques_and_antibiograms(tmp_path) -> No
                 parse_status="PARSED_OK",
                 payload_json=json.dumps(
                     {
-                        "NºHistoria": "123",
+                        "nºhistoria": "123",
+                        "afi": "AFI-1",
                         "NºMuestra": "M-1",
                         "Cod.Microorganismo": "E_COLI",
                         "extra": [
@@ -76,6 +77,7 @@ def test_microb_staging_materializes_techniques_and_antibiograms(tmp_path) -> No
         technique = conn.execute(
             select(
                 stg_microb_technique.c.nhc,
+                stg_microb_technique.c.afi,
                 stg_microb_technique.c.num_muestra,
                 stg_microb_technique.c.cod_microorganismo,
             )
@@ -86,5 +88,5 @@ def test_microb_staging_materializes_techniques_and_antibiograms(tmp_path) -> No
                 stg_microb_antibiogram.c.cod_int,
             )
         ).one()
-    assert technique == ("123", "M-1", "E_COLI")
+    assert technique == ("123", "AFI-1", "M-1", "E_COLI")
     assert antibiogram == ("AMC", "S")
