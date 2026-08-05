@@ -59,3 +59,29 @@ dianas dentro de esa ventana.
 En Screening, un control positivo con Cq válido y pico fuera de todas las
 ventanas se señala como `POSITIVE_CONTROL_MELTING_INCOMPATIBLE`, no como un
 control simplemente no positivo.
+
+## 2026-08-05 — Control negativo positivo de 16S
+
+Para la diana `16S`, un pozo clasificado como control negativo con llamada
+`POSITIVE` se conserva como advertencia `NEGATIVE_CONTROL_POSITIVE`, pero el
+QC de esa diana se mantiene válido. No se aplica esta excepción a otras
+dianas: en ellas la misma situación sigue invalidando el QC.
+
+## 2026-08-05 — Alcance analítico de runs experimentales
+
+Los runs no se eliminan por antigüedad. `pcr_run_scope` registra explícitamente
+si un run es `EXPERIMENTAL` o `ROUTINE`, junto con el motivo, autor y momento
+de asignación. Cada derivación aplica automáticamente el corte configurado en
+`PCR_EXPERIMENTAL_BEFORE` (o recibido como parámetro del trabajo) y lo guarda
+en los parámetros de la derivación. Si no se configura, el corte por defecto
+es `2023-07-01T00:00:00`, que deja como experimentales todos los runs hasta el
+30 de junio de 2023 incluido. La materialización PCR aplica esa misma política
+tras promover `run_started`. La variable usa una fecha/hora ISO-8601, por
+ejemplo `YYYY-MM-DDTHH:MM:SS`; el límite es estricto (`run_started < corte`).
+La sincronización escribe ambos alcances de forma explícita: los runs desde el
+corte incluido quedan registrados como `ROUTINE`.
+
+Los runs `EXPERIMENTAL` conservan evidencia raw y materializada, pero quedan
+fuera de la derivación analítica, selección de resultados y vistas de
+resultados operativos. Se puede corregir cada run de forma auditable mediante
+la API de repositorio de alcance.

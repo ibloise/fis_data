@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.engine import Engine
@@ -11,6 +12,8 @@ from ..enums import DerivationStatuses
 from ..melting import MeltingParameters
 from ..review.models import ActiveOverride
 from ..review.repository import PCRReviewRepository
+from ..scope_policy import experimental_before_from_environment
+from ..scope_repository import PCRRunScopeRepository
 from .domain import (
     classify_run,
     classify_sample_name,
@@ -50,6 +53,7 @@ class PCRAnalyticsJob:
         repository: PCRAnalyticsRepository | None = None,
         pipeline: PCRAnalyticsPipeline | None = None,
         review_repository: PCRReviewRepository | None = None,
+        scope_repository: PCRRunScopeRepository | None = None,
     ) -> None:
         if repository is None:
             if engine is None:
@@ -62,6 +66,9 @@ class PCRAnalyticsJob:
         self.review_repository = review_repository or (
             PCRReviewRepository(engine) if engine is not None else None
         )
+        self.scope_repository = scope_repository or (
+            PCRRunScopeRepository(engine) if engine is not None else None
+        )
 
     def run(
         self,
@@ -70,17 +77,29 @@ class PCRAnalyticsJob:
         params: MeltingParameters | None = None,
         rebuild: bool = False,
         ignore_overrides: bool = False,
+        experimental_before: datetime | None = None,
     ) -> DerivationStats:
         """Run all analytical stages and record a terminal derivation status."""
 
         current = params or MeltingParameters()
+        cutoff = experimental_before or experimental_before_from_environment()
+        if cutoff is not None and self.scope_repository is not None:
+            self.scope_repository.assign_before(
+                before=cutoff,
+                reason=f"RUN_STARTED_POLICY_CUTOFF:{cutoff.isoformat()}",
+            )
         overrides: list[ActiveOverride] = []
         if not ignore_overrides and self.review_repository is not None:
             overrides = self.review_repository.active_overrides()
         self.pipeline.set_overrides(overrides)
         derivation_id = self.repository.start_derivation(
             algorithm_version=algorithm_version,
-            parameters_json=_json(current.as_dict()),
+            parameters_json=_json(
+                {
+                    **current.as_dict(),
+                    "experimental_before": cutoff.isoformat() if cutoff else None,
+                }
+            ),
             rebuild=rebuild,
         )
 

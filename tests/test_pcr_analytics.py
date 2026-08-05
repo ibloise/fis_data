@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from unittest.mock import Mock
+from datetime import datetime
 
 from click.testing import CliRunner
 from sqlalchemy import create_engine, insert, text
@@ -33,6 +34,7 @@ from fis_data.etl.pcr.melting import (
 )
 from fis_data.etl.pcr.review.repository import PCRReviewRepository
 from fis_data.etl.pcr.review.service import PCRReviewService
+from fis_data.etl.pcr.scope_policy import experimental_before_from_environment
 from fis_data.schema import (
     create_schema,
     ctl_etl_run,
@@ -42,9 +44,60 @@ from fis_data.schema import (
     pcr_derivation_run,
     pcr_rfu_measurement,
     pcr_run,
+    pcr_run_scope,
     pcr_run_attribute,
     pcr_well,
 )
+
+
+def test_experimental_scope_excludes_runs_from_analytics_candidates(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'scope.sqlite'}", future=True)
+    create_schema(engine)
+    with engine.begin() as conn:
+        source_id = conn.execute(
+            insert(ctl_source).values(source_name="PCR", source_type="PCR")
+        ).lastrowid
+        conn.execute(
+            insert(pcr_run),
+            [
+                {
+                    "source_id": source_id,
+                    "run_name": "old",
+                    "run_name_normalized": "old",
+                    "run_started": datetime(2023, 6, 30, 23, 59, 59),
+                },
+                {
+                    "source_id": source_id,
+                    "run_name": "new",
+                    "run_name_normalized": "new",
+                    "run_started": datetime(2023, 7, 1),
+                },
+            ],
+        )
+
+    PCRAnalyticsJob(engine).run(
+        algorithm_version="scope-policy",
+        experimental_before=datetime(2023, 7, 1),
+    )
+
+    with engine.connect() as conn:
+        scopes = dict(
+            conn.execute(
+                pcr_run_scope.join(
+                    pcr_run, pcr_run_scope.c.pcr_run_id == pcr_run.c.pcr_run_id
+                ).select().with_only_columns(
+                    pcr_run.c.run_name, pcr_run_scope.c.analytical_scope
+                )
+            ).all()
+        )
+    assert scopes == {"old": "EXPERIMENTAL", "new": "ROUTINE"}
+    assert [run.run_name for run in PCRAnalyticsRepository(engine).fetch_runs()] == ["new"]
+
+
+def test_experimental_scope_uses_the_documented_default(monkeypatch) -> None:
+    monkeypatch.delenv("PCR_EXPERIMENTAL_BEFORE", raising=False)
+
+    assert experimental_before_from_environment() == datetime(2023, 7, 1)
 
 
 def test_successful_derivation_is_atomically_promoted_as_current(tmp_path) -> None:

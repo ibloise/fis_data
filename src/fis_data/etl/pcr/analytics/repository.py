@@ -125,8 +125,12 @@ class PCRAnalyticsRepository:
             rows = conn.execute(
                 text(
                     """
-                    SELECT pcr_well_id, sample_name, content
-                    FROM pcr_well ORDER BY pcr_well_id
+                    SELECT well.pcr_well_id, well.sample_name, well.content
+                    FROM pcr_well AS well
+                    LEFT JOIN pcr_run_scope AS scope
+                      ON scope.pcr_run_id=well.pcr_run_id
+                    WHERE COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
+                    ORDER BY well.pcr_well_id
                     """
                 )
             ).all()
@@ -182,6 +186,9 @@ class PCRAnalyticsRepository:
                     """
                     SELECT run.pcr_run_id, run.run_name, run.run_started
                     FROM pcr_run AS run
+                    LEFT JOIN pcr_run_scope AS scope
+                      ON scope.pcr_run_id=run.pcr_run_id
+                    WHERE COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
                     ORDER BY run.pcr_run_id
                     """
                 )
@@ -189,8 +196,12 @@ class PCRAnalyticsRepository:
             target_rows = conn.execute(
                 text(
                     """
-                    SELECT pcr_run_id, target FROM pcr_cq_result
-                    GROUP BY pcr_run_id, target
+                    SELECT result.pcr_run_id, result.target
+                    FROM pcr_cq_result AS result
+                    LEFT JOIN pcr_run_scope AS scope
+                      ON scope.pcr_run_id=result.pcr_run_id
+                    WHERE COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
+                    GROUP BY result.pcr_run_id, result.target
                     """
                 )
             ).all()
@@ -230,8 +241,13 @@ class PCRAnalyticsRepository:
             rows = conn.execute(
                 text(
                     """
-                    SELECT pcr_cq_result_id, pcr_run_id, pcr_well_id, target, cq
-                    FROM pcr_cq_result ORDER BY pcr_well_id
+                    SELECT result.pcr_cq_result_id, result.pcr_run_id,
+                           result.pcr_well_id, result.target, result.cq
+                    FROM pcr_cq_result AS result
+                    LEFT JOIN pcr_run_scope AS scope
+                      ON scope.pcr_run_id=result.pcr_run_id
+                    WHERE COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
+                    ORDER BY result.pcr_well_id
                     """
                 )
             ).all()
@@ -256,7 +272,10 @@ class PCRAnalyticsRepository:
                     """
                     SELECT pcr_well_id, axis_value, rfu
                     FROM pcr_rfu_measurement
+                    LEFT JOIN pcr_run_scope AS scope
+                      ON scope.pcr_run_id=pcr_rfu_measurement.pcr_run_id
                     WHERE measurement_kind = :measurement_kind
+                      AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
                     ORDER BY pcr_well_id, axis_value
                     """
                 ),
@@ -520,8 +539,11 @@ class PCRAnalyticsRepository:
                       ON qc.derivation_id = interpretation.derivation_id
                      AND qc.pcr_run_id = interpretation.pcr_run_id
                      AND qc.canonical_target = interpretation.canonical_target
+                    LEFT JOIN pcr_run_scope AS scope
+                      ON scope.pcr_run_id=interpretation.pcr_run_id
                     WHERE interpretation.derivation_id = :derivation_id
                       AND classification.well_role = :real_sample
+                      AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
                     """
                 ),
                 {

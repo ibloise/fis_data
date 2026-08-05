@@ -19,6 +19,7 @@ from .enums import (
     PCRSheetKinds,
 )
 from .repository import PCRMaterializationRepository
+from .scope_policy import experimental_before_from_environment
 
 
 class PCRMaterializer:
@@ -124,6 +125,11 @@ class PCRMaterializer:
 
             conflicts = _refresh_attribute_flags(conn, pcr_run_id=pcr_run_id)
             _refresh_run_metadata(conn, pcr_run_id=pcr_run_id)
+            cutoff = experimental_before_from_environment()
+            if cutoff is not None:
+                PCRMaterializationRepository(conn).assign_scope_from_policy(
+                    pcr_run_id=pcr_run_id, before=cutoff
+                )
             _refresh_well_metadata(conn, pcr_run_id=pcr_run_id)
             if reprocess:
                 for affected_run_id in affected_run_ids | {pcr_run_id}:

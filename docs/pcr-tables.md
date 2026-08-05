@@ -35,11 +35,11 @@ El modelo tiene tres capas:
 
 | Capa | Tablas |
 | --- | --- |
-| Evidencia materializada | `pcr_run`, `pcr_run_file`, `pcr_run_attribute`, `pcr_well`, `pcr_cq_result`, `pcr_rfu_measurement` |
+| Evidencia materializada | `pcr_run`, `pcr_run_scope`, `pcr_run_file`, `pcr_run_attribute`, `pcr_well`, `pcr_cq_result`, `pcr_rfu_measurement` |
 | Analítica derivada | `pcr_derivation_run`, `pcr_sample`, `pcr_well_classification`, `pcr_run_analysis`, `pcr_interpretation`, `pcr_target_qc`, `pcr_target_qc_evidence`, `pcr_run_qc`, `pcr_episode`, `pcr_episode_run`, `pcr_result_selection` |
 | Revisión y auditoría | `pcr_review_action` |
 
-En total hay **18 tablas físicas PCR** y **7 vistas públicas PCR**.
+En total hay **19 tablas físicas PCR** y **7 vistas públicas PCR**.
 
 ```mermaid
 flowchart LR
@@ -47,6 +47,7 @@ flowchart LR
     E["ctl_etl_run"] --> RF
     R["pcr_run"] --> RF
     R --> A["pcr_run_attribute"]
+    R --> SCOPE["pcr_run_scope"]
     R --> W["pcr_well"]
     W --> CQ["pcr_cq_result"]
     W --> RFU["pcr_rfu_measurement"]
@@ -171,6 +172,28 @@ amplificación y curvas de melting— se agrupan en el mismo run mediante el val
 reprocesar, elimina un run si ya no conserva ninguna fila en `pcr_run_file`.
 Los campos de metadatos se sincronizan desde los atributos canónicos de
 `pcr_run_attribute`; dicha tabla conserva la procedencia y los conflictos.
+
+### `pcr_run_scope`
+
+Define si un run puede participar en la analítica operativa. Es una decisión
+persistente y auditable, independiente de la evidencia y de la fecha CFX.
+
+| Columna | Tipo | Nulo | Significado |
+| --- | --- | --- | --- |
+| `pcr_run_id` | Integer, PK/FK → `pcr_run.pcr_run_id` | No | Run al que aplica el alcance. |
+| `analytical_scope` | String(20) | No | `ROUTINE` o `EXPERIMENTAL`. Un run sin fila se trata como `ROUTINE`. |
+| `reason` | Text | No | Justificación trazable de la política o excepción. |
+| `assigned_by` | String(20) | No | Origen de la decisión: habitualmente `POLICY` o `MANUAL`. |
+| `assigned_at` | DateTime | No | Alta de la asignación; por defecto `CURRENT_TIMESTAMP`. |
+
+**Índice:** `idx_pcr_run_scope_scope (analytical_scope)`.
+
+Los flujos de materialización y derivación crean o actualizan estas asignaciones
+automáticamente a partir de `PCR_EXPERIMENTAL_BEFORE` o del parámetro de
+política recibido por la derivación. Si no se indica otro valor, el corte es
+`2023-07-01T00:00:00`. Los runs
+`EXPERIMENTAL` conservan los datos fuente, pero no participan en la derivación
+analítica ni en las vistas operativas de resultados.
 
 ### `pcr_run_file`
 

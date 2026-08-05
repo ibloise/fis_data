@@ -265,6 +265,21 @@ pcr_run = Table(
     UniqueConstraint("source_id", "run_name_normalized", name="uq_pcr_run_source_name"),
 )
 
+pcr_run_scope = Table(
+    "pcr_run_scope",
+    metadata,
+    Column("pcr_run_id", Integer, ForeignKey("pcr_run.pcr_run_id"), primary_key=True),
+    Column("analytical_scope", String(20), nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("assigned_by", String(20), nullable=False),
+    Column(
+        "assigned_at",
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
 pcr_run_file = Table(
     "pcr_run_file",
     metadata,
@@ -671,6 +686,7 @@ Index(
     ctl_materialization_item.c.materializer_name,
 )
 Index("idx_pcr_run_file_run", pcr_run_file.c.pcr_run_id)
+Index("idx_pcr_run_scope_scope", pcr_run_scope.c.analytical_scope)
 Index(
     "idx_pcr_cq_run_well",
     pcr_cq_result.c.pcr_run_id,
@@ -829,7 +845,10 @@ def create_views(engine: Engine) -> None:
             LEFT JOIN pcr_interpretation AS interpretation
               ON interpretation.interpretation_id =
                  selection.preferred_interpretation_id
+            LEFT JOIN pcr_run_scope AS scope
+              ON scope.pcr_run_id=interpretation.pcr_run_id
             WHERE selection.derivation_id = ({current})
+              AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
         """,
         "v_pcr_effective_result": f"""
             WITH ranked_override AS (
@@ -860,7 +879,10 @@ def create_views(engine: Engine) -> None:
              AND override.subject_key=('sample:' || sample.sample_key ||
                                        ':run_type:' || selection.run_type ||
                                        ':target:' || selection.canonical_target)
+            LEFT JOIN pcr_run_scope AS scope
+              ON scope.pcr_run_id=interpretation.pcr_run_id
             WHERE selection.derivation_id=({current})
+              AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
         """,
         "v_pcr_result_history": f"""
             SELECT sample.sample_key, interpretation.canonical_target,
@@ -876,7 +898,10 @@ def create_views(engine: Engine) -> None:
             JOIN pcr_run_analysis AS analysis
               ON analysis.derivation_id=interpretation.derivation_id
              AND analysis.pcr_run_id=interpretation.pcr_run_id
+            LEFT JOIN pcr_run_scope AS scope
+              ON scope.pcr_run_id=interpretation.pcr_run_id
             WHERE interpretation.derivation_id=({current})
+              AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
         """,
         "v_pcr_run_qc": f"""
             SELECT run_qc.*, run.run_name FROM pcr_run_qc AS run_qc
