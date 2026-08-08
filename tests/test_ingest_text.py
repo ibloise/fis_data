@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
-from fis_data.db import DBSettings, get_engine, sqlite_url_for_path
 from fis_data.etl.control import RunStatus, ensure_source, finish_run, start_run
 from fis_data.etl.file_registry import register_file
 from fis_data.etl.ingest_text import ingest_text_file
@@ -15,7 +14,7 @@ def test_ingest_text_file_preserves_raw_lines(tmp_path) -> None:
     source_path = tmp_path / "source.txt"
     source_path.write_text("nhc|name|value\n1|Ana|ok\n", encoding="utf-8")
 
-    engine = get_engine(DBSettings(url=sqlite_url_for_path(db_path)))
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
     create_schema(engine)
 
     source_id = ensure_source(engine, source_name="TEST", source_type="file")
@@ -62,7 +61,7 @@ def test_ingest_text_file_rejects_empty_files(tmp_path) -> None:
     source_path = tmp_path / "empty.txt"
     source_path.write_bytes(b"")
 
-    engine = get_engine(DBSettings(url=sqlite_url_for_path(db_path)))
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
     create_schema(engine)
 
     with pytest.raises(ValueError, match="empty"):

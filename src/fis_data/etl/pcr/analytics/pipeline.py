@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from typing import Any
 
@@ -72,61 +73,69 @@ class PCRAnalyticsPipeline:
             for override in overrides
         }
 
-    def classify_wells(self, derivation_id: int) -> tuple[int, int]:
-        """Classify source wells and persist canonical sample associations."""
+    def classify_wells(
+        self,
+        derivation_id: int,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> tuple[int, int]:
+        """Classify source wells in bounded batches and persist each batch."""
 
-        wells = self.repository.fetch_wells()
         well_overrides = {
             int(key.removeprefix("well:")): override.payload
             for (item_type, key), override in self.overrides.items()
             if item_type == ReviewItemType.well and key.startswith("well:")
         }
-        sample_keys = {
-            sample_key(str(well.sample_name))
-            for well in wells
-            if is_real_sample(well.sample_name)
-        }
-        sample_keys.update(
-            str(payload["sample_key"])
-            for payload in well_overrides.values()
-            if payload.get("role") == WellRoles.real_sample
-            and payload.get("sample_key")
-        )
-        sorted_sample_keys = sorted(sample_keys)
-        sample_ids = self.repository.ensure_samples(sorted_sample_keys)
-        classifications = []
-        for well in wells:
-            role, normalized, rule_key, review = classify_sample_name(
-                well.sample_name, well.content
-            )
-            override = well_overrides.get(well.well_id)
-            if override:
-                role = str(override["role"])
-                normalized = override.get("sample_key") or normalized
-                rule_key = "MANUAL_OVERRIDE"
-                review = None
-            canonical_sample = (
-                str(override["sample_key"])
-                if override and override.get("sample_key")
-                else sample_key(str(well.sample_name))
-                if role == WellRoles.real_sample
-                else None
-            )
-            classifications.append(
-                WellClassification(
-                    derivation_id=derivation_id,
-                    well_id=well.well_id,
-                    sample_id=sample_ids.get(canonical_sample),
-                    raw_name=well.sample_name,
-                    normalized=normalized,
-                    role=role,
-                    rule_key=rule_key,
-                    content=well.content,
-                    review=review,
+        total_wells = self.repository.count_wells()
+        processed_wells = 0
+        real_sample_keys: set[str] = set()
+        for wells in self.repository.iter_wells():
+            prepared = []
+            batch_sample_keys: set[str] = set()
+            for well in wells:
+                role, normalized, rule_key, review = classify_sample_name(
+                    well.sample_name, well.content
                 )
+                override = well_overrides.get(well.well_id)
+                if override:
+                    role = str(override["role"])
+                    normalized = override.get("sample_key") or normalized
+                    rule_key = "MANUAL_OVERRIDE"
+                    review = None
+                canonical_sample = (
+                    str(override["sample_key"])
+                    if override and override.get("sample_key")
+                    else sample_key(str(well.sample_name))
+                    if role == WellRoles.real_sample
+                    else None
+                )
+                if canonical_sample is not None:
+                    batch_sample_keys.add(canonical_sample)
+                    real_sample_keys.add(canonical_sample)
+                prepared.append(
+                    (well, role, normalized, rule_key, review, canonical_sample)
+                )
+            sample_ids = self.repository.ensure_samples(sorted(batch_sample_keys))
+            self.repository.insert_well_classifications(
+                [
+                    WellClassification(
+                        derivation_id=derivation_id,
+                        well_id=well.well_id,
+                        sample_id=sample_ids.get(canonical_sample),
+                        raw_name=well.sample_name,
+                        normalized=normalized,
+                        role=role,
+                        rule_key=rule_key,
+                        content=well.content,
+                        review=review,
+                    )
+                    for well, role, normalized, rule_key, review, canonical_sample in prepared
+                ]
             )
-        self.repository.insert_well_classifications(classifications)
-        return len(wells), len(sorted_sample_keys)
+            processed_wells += len(wells)
+            if on_progress is not None:
+                on_progress(processed_wells, total_wells)
+        return processed_wells, len(real_sample_keys)
 
     def classify_runs(self, derivation_id: int) -> None:
         """Classify source runs from targets and normalized run metadata."""

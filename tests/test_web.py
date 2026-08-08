@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 from fis_data.web import create_app
 from fis_data.web.app import _curve_series
 
 
-def test_web_application_exposes_pcr_review_contract() -> None:
-    app = create_app(database_url="sqlite:///:memory:")
+def test_web_application_exposes_pcr_review_contract(monkeypatch) -> None:
+    monkeypatch.setattr("fis_data.web.app.get_engine", lambda _settings: Mock())
+    app = create_app(database_url="postgresql://test")
 
     paths = app.openapi()["paths"]
 
     assert "/api/health" in paths
     assert "/api/pcr/runs" in paths
+    assert "/api/pcr/samples/{sample_number}/runs" in paths
+    assert "/api/pcr/samples/{sample_number}/results" in paths
     assert "/api/pcr/runs/{run_id}/filters" in paths
     assert "/api/pcr/runs/{run_id}/curves" in paths
     assert "/api/pcr/qc" in paths
     assert "/api/pcr/qc/{run_id}/{target}/evidence" in paths
+    assert "/api/pcr/review-queue" in paths
 
 
 def test_curve_series_uses_sample_target_for_a_run_and_target_for_one_sample() -> None:

@@ -35,9 +35,9 @@ def ensure_source(engine: Engine, *, source_name: str, source_type: str) -> int:
             return int(existing)
 
         result = conn.execute(
-            insert(ctl_source).values(source_name=source_name, source_type=source_type)
+            insert(ctl_source).values(source_name=source_name, source_type=source_type).returning(ctl_source.c.source_id)
         )
-        return int(result.lastrowid)
+        return int(result.scalar_one())
 
 
 def start_run(engine: Engine, *, pipeline_name: str) -> int:
@@ -47,9 +47,9 @@ def start_run(engine: Engine, *, pipeline_name: str) -> int:
         result = conn.execute(
             insert(ctl_etl_run).values(
                 pipeline_name=pipeline_name, status=RunStatus.STARTED.value
-            )
+            ).returning(ctl_etl_run.c.run_id)
         )
-        return int(result.lastrowid)
+        return int(result.scalar_one())
 
 
 def finish_run(

@@ -8,8 +8,8 @@ from typing import Any
 
 from sqlalchemy.engine import Engine
 
-from .contracts import JobContext, JobResult
-from .microb_repository import MicrobStagingRepository
+from ..contracts import JobContext, JobResult
+from .repository import MicrobStagingRepository
 
 
 @dataclass(frozen=True)

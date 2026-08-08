@@ -11,12 +11,33 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
-Configure the default SQLite database path in `.env`:
+Configure the PostgreSQL connection in `.env`:
 
 ```bash
-FIS_DB_PATH=var/fis_data.sqlite
-FIS_DB_ECHO=false
+FIS_DATA_DB_USER=fis_data
+FIS_DATA_DB_PASSWORD=change-me
+FIS_DATA_DB_HOST=localhost
+FIS_DATA_DB_PORT=5432
+FIS_DATA_DB_NAME=fis_data
+FIS_DATA_DB_ECHO=false
 ```
+
+The initial PostgreSQL instance can be provisioned by an administrator with
+[`scripts/postgres/bootstrap.sql`](scripts/postgres/bootstrap.sql). Afterwards,
+configure the application user and run `fis-data init-db` to create the FIS
+Data schema.
+
+Run the bootstrap script from the repository root as a PostgreSQL administrator:
+
+```bash
+psql \
+  -v app_password='CONTRASEÑA_SEGURA' \
+  -f scripts/postgres/bootstrap.sql \
+  postgres
+```
+
+The final `postgres` argument is the administrative database used to create the
+new `fis_data` database.
 
 Run tests:
 
@@ -26,11 +47,14 @@ pytest
 
 ## Raw Ingestion
 
-Initialize a SQLite database:
+Initialize the PostgreSQL schema:
 
 ```bash
 fis-data init-db
 ```
+
+The commands read `FIS_DATA_DB_*` from the environment. A PostgreSQL SQLAlchemy
+URL can override that configuration per command with `--db-url`.
 
 Ingest text files into the raw layer:
 
@@ -54,6 +78,16 @@ fis-data ingest-excel --source-name SOURCE --entity ENTITY path/to/file.xlsx
 fis-data ingest-excel --source-name SOURCE --entity ENTITY path/to/folder
 ```
 
+Parse the ingested PCR workbook rows into `payload_json` before materializing
+them into the normalized PCR tables:
+
+```bash
+fis-data parse-excel --entity pcr
+```
+
+You can parse one workbook with `--file-id FILE_ID` or reparse all rows with
+`--reprocess-all`.
+
 Directory inputs for Excel are recursive and only ingest OpenXML workbooks
 (`.xlsx`, `.xlsm`, `.xltx`, `.xltm`). Temporary Excel lock files are ignored.
 Empty or invalid workbooks are skipped by default; use `--strict` to make the
@@ -65,6 +99,30 @@ Parse pending Microb raw text rows into `payload_json`:
 fis-data parse-microb --entity microb
 fis-data parse-microb --entity microb --file-id 1
 ```
+
+Load or refresh the versioned Microb reference catalogs from a directory of
+pipe-delimited catalog files:
+
+```bash
+fis-data load-microb-catalogs --catalog-dir path/to/catalogs
+```
+
+The command records each catalog version by its checksum and marks the latest
+version as current. It can be run before or after Microb ingestion; the
+catalogs are available for later normalization and review.
+
+Normalize parsed and staged Microb records into the relational domain model:
+
+```bash
+fis-data normalize-microb
+fis-data normalize-microb --file-id FILE_ID
+fis-data normalize-microb --rebuild
+```
+
+The normalization resolves current catalog entries, preserves staging lineage
+and records unknown catalog codes in `microb_normalization_issue`.
+`--rebuild` deletes the complete normalized Microb layer before loading it
+again; it never deletes staging records or reference catalogs.
 
 ## Domain Materialization
 
@@ -96,6 +154,56 @@ result layers after PCR materialization:
 fis-data derive-pcr --algorithm-version melting-v1 --rebuild
 ```
 
+The final stage also reconciles eligible PCR samples with their exact Microb
+match and, where permitted, compatible previous 068/PMDR cultures. Its default
+historical window is 90 days with up to 3 intervening negative cultures; both
+limits are configurable and versioned with the derivation:
+
+```bash
+fis-data derive-pcr --algorithm-version melting-v1 --rebuild \
+  --previous-sample-max-days 90 --previous-sample-max-negatives 3
+```
+
+It creates audit-only `pcr_sil_*` tables and never overwrites PCR or Microb
+facts. See [`docs/pcr_sil_linking.md`](docs/pcr_sil_linking.md) for the exact
+matching and culture-characterization policy.
+
+Promoted PCR results are additionally summarized per sample in
+`v_pcr_sample_result`. Specific-phase results take precedence: any positive
+OXA48/KPC/NDM/VIM target is positive, while all four negatives are negative.
+Without a specific phase, a negative screening is negative; a positive
+screening is also retained as negative but carries the warning
+`SCREENING_POSITIVE_WITHOUT_SPECIFIC_PHASE`. Per-target Cq normalization is in
+`v_pcr_sample_target_metric`, where `delta_cq` is
+`log10(2^(target_cq - reference_16s_cq))` for the same run and sample.
+
+## Downstream exports
+
+Downstream layouts are registered as independent export frames. The initial
+`analytical-core-tables` frame provides two downstream-ready crossing sheets:
+`SIL PCR global` (one row per sample number) and `SIL PCR organisms` (one row
+per microorganism), together with supporting core tables. The `Report` sheet
+records export time, derivation identity, and the versioned melting and
+PCR--SIL linking policies:
+
+```bash
+fis-data export-downstream --format analytical-core-tables \
+  --output analytical_core_tables.xlsx
+```
+
+The primary SIL marker columns in those two crossing sheets are the reconciled
+comparison result: direct evidence when present, or compatible inherited
+evidence when the policy permits it. Direct current-culture profiles remain as
+`direct_*` support columns for traceability.
+
+Additional downstream layouts can be added without changing this command or
+the shared workbook writer.
+
+In the two downstream crossing sheets, an invalid promoted target is exported
+as `-1`, never as a negative (`0`). Any binary PCR encoding containing an
+invalid target is exported as `INVALID` rather than a four-bit negative/positive
+code.
+
 The default melting parameters use normalized-curve peak prominence `0.15`, a
 minimum temperature of `70`, a raw derivative RFU threshold of `100`, Cq limits
 `5` and `40`, and a `±0.5` temperature window around OXA48 (`79.5`), VIM (`82`),
@@ -121,7 +229,7 @@ Functional decisions that affect PCR interpretation are recorded in
 Start the read-only FastAPI application against the local database:
 
 ```bash
-fis-data serve --db-path var/fis_data.sqlite
+fis-data serve
 ```
 
 Open `http://127.0.0.1:8000` to review target QC and inspect amplification
@@ -138,8 +246,8 @@ revisión para pozos, runs, episodios, QC y resultados.
 Review items without updating analytical tables directly:
 
 ```bash
-fis-data pcr-review --db-path var/fis_data.sqlite list --format table
-fis-data pcr-review --db-path var/fis_data.sqlite show \
+fis-data pcr-review list --format table
+fis-data pcr-review show \
   --type RESULT --subject sample:123:target:KPC
 ```
 
@@ -152,7 +260,7 @@ audit events; previous actions are never updated or deleted.
 Apply active overrides through a new rebuildable derivation:
 
 ```bash
-fis-data pcr-review --db-path var/fis_data.sqlite apply \
+fis-data pcr-review apply \
   --algorithm-version melting-v1 --reviewer analyst
 ```
 

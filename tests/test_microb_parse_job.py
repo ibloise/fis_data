@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
-from fis_data.db import DBSettings, get_engine, sqlite_url_for_path
 from fis_data.etl.contracts import JobContext
 from fis_data.etl.control import ensure_source, start_run
 from fis_data.etl.file_registry import register_file
 from fis_data.etl.ingest_text import ingest_text_file
-from fis_data.etl.microb_parse_job import MicrobParseJob
+from fis_data.etl.microb.parse_job import MicrobParseJob
 from fis_data.schema import create_schema
 
 
@@ -18,7 +17,7 @@ def test_microb_parse_job_updates_raw_text_payloads(tmp_path) -> None:
     source_path = tmp_path / "microb.txt"
     source_path.write_text("a|b|c|\n1|v2|v3|\n", encoding="utf-8")
 
-    engine = get_engine(DBSettings(url=sqlite_url_for_path(db_path)))
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
     create_schema(engine)
     source_id = ensure_source(engine, source_name="microb", source_type="file")
     run_id = start_run(engine, pipeline_name="ingest:text:microb")

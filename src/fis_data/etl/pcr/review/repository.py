@@ -34,7 +34,7 @@ class PCRReviewRepository:
                 text(
                     """
                     SELECT derivation_id FROM pcr_derivation_run
-                    WHERE status='SUCCESS' AND is_current=1
+                    WHERE status='SUCCESS' AND is_current=TRUE
                     """
                 )
             ).scalar_one()
@@ -107,7 +107,7 @@ class PCRReviewRepository:
                     JOIN pcr_sample AS sample
                       ON sample.pcr_sample_id=selection.pcr_sample_id
                     WHERE selection.derivation_id=:id
-                      AND selection.needs_review=1
+                      AND selection.needs_review=TRUE
                     """
                 ),
                 {"id": derivation_id},
@@ -538,6 +538,7 @@ class PCRReviewRepository:
                         :derivation_id, :action, :resolution, :override_kind,
                         :payload, :reason, :reviewer
                     )
+                    RETURNING review_action_id
                     """
                 ),
                 {
@@ -553,7 +554,7 @@ class PCRReviewRepository:
                     "reviewer": action.reviewer,
                 },
             )
-            action_id = int(result.lastrowid)
+            action_id = int(result.scalar_one())
         return self.get_action(action_id)
 
     def get_action(self, action_id: int) -> ReviewAction:

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any
 
 import click
 
-from ....db import DBSettings, get_engine, sqlite_url_for_path
+from ....db import get_engine, get_db_settings
 from ....schema import create_schema
 from ...control import RunStatus, finish_run, start_run
 from ..analytics import PCRAnalyticsJob
@@ -18,18 +17,12 @@ from .service import PCRReviewService
 
 
 @click.group("pcr-review")
-@click.option(
-    "--db-path", type=click.Path(dir_okay=False), help="SQLite database path."
-)
+@click.option("--db-url", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
 @click.pass_context
-def pcr_review(ctx: click.Context, db_path: str | None) -> None:
+def pcr_review(ctx: click.Context, db_url: str | None) -> None:
     """Inspect and correct PCR analytical review items."""
 
-    engine = (
-        get_engine()
-        if db_path is None
-        else get_engine(DBSettings(url=sqlite_url_for_path(Path(db_path).expanduser())))
-    )
+    engine = get_engine(get_db_settings(db_url))
     create_schema(engine)
     ctx.obj = {
         "engine": engine,

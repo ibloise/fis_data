@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -84,7 +85,7 @@ raw_text_lines = Table(
     Column("line_no", Integer, nullable=False),
     Column("raw_line", Text, nullable=False),
     Column("raw_line_sha256", String(64), nullable=False),
-    Column("is_header", Boolean, nullable=False, server_default=text("0")),
+    Column("is_header", Boolean, nullable=False, server_default=text("false")),
     Column(
         "parse_status",
         String(20),
@@ -114,7 +115,7 @@ raw_excel_rows = Table(
     Column("row_no", Integer, nullable=False),
     Column("raw_values_json", Text, nullable=False),
     Column("row_sha256", String(64), nullable=False),
-    Column("is_header", Boolean, nullable=False, server_default=text("0")),
+    Column("is_header", Boolean, nullable=False, server_default=text("false")),
     Column(
         "parse_status",
         String(20),
@@ -216,7 +217,7 @@ ref_microb_catalog = Table(
     Column("source_path", String(1024), nullable=False),
     Column("sha256", String(64), nullable=False),
     Column("entry_count", Integer, nullable=False),
-    Column("is_current", Boolean, nullable=False, server_default=text("0")),
+    Column("is_current", Boolean, nullable=False, server_default=text("false")),
     Column("loaded_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
     UniqueConstraint("catalog_name", "sha256", name="uq_ref_microb_catalog_name_sha"),
 )
@@ -238,6 +239,131 @@ ref_microb_catalog_entry = Table(
     UniqueConstraint(
         "ref_microb_catalog_id", "code", name="uq_ref_microb_catalog_entry_code"
     ),
+)
+
+# Normalized Microb domain.  The source codes remain in the reference FK
+# columns; staging is retained as the authoritative raw lineage.
+microb_patient = Table(
+    "microb_patient", metadata,
+    Column("patient_id", Integer, primary_key=True, autoincrement=True),
+    Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
+    Column("nhc", String(32)), Column("afi", String(32)), Column("sex", String(8)),
+    Column("birth_date", Date), Column("first_name", String(255)),
+    Column("surname1", String(255)), Column("surname2", String(255)),
+    UniqueConstraint("source_id", "nhc", name="uq_microb_patient_source_nhc"),
+)
+
+microb_sample = Table(
+    "microb_sample", metadata,
+    Column("sample_id", Integer, primary_key=True, autoincrement=True),
+    Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
+    Column("patient_id", Integer, ForeignKey("microb_patient.patient_id")),
+    Column("sample_number", String(32), nullable=False),
+    Column("received_at", DateTime), Column("entered_at", DateTime),
+    Column("origin_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("service_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("hospital_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("specimen_type_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("specimen_location_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("floor", String(64)), Column("room", String(64)), Column("box", String(32)),
+    UniqueConstraint("source_id", "sample_number", name="uq_microb_sample_source_number"),
+)
+
+microb_sample_analysis = Table(
+    "microb_sample_analysis", metadata,
+    Column("sample_analysis_id", Integer, primary_key=True, autoincrement=True),
+    Column("sample_id", Integer, ForeignKey("microb_sample.sample_id"), nullable=False),
+    Column("analysis_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("analysis_code", String(32), nullable=False),
+    Column("analysis_kind", String(20)), Column("box_id", String(32)),
+    Column("resulted_at", DateTime),
+    UniqueConstraint("sample_id", "analysis_code", name="uq_microb_sample_analysis"),
+)
+
+microb_analysis_result = Table(
+    "microb_analysis_result", metadata,
+    Column("analysis_result_id", Integer, primary_key=True, autoincrement=True),
+    Column("sample_analysis_id", Integer, ForeignKey("microb_sample_analysis.sample_analysis_id"), nullable=False),
+    Column("result_code_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("result_code", String(32), nullable=False),
+    UniqueConstraint("sample_analysis_id", "result_code", name="uq_microb_analysis_result"),
+)
+
+microb_isolate = Table(
+    "microb_isolate", metadata,
+    Column("isolate_id", Integer, primary_key=True, autoincrement=True),
+    Column("analysis_result_id", Integer, ForeignKey("microb_analysis_result.analysis_result_id"), nullable=False),
+    Column("isolate_number", String(16), nullable=False),
+    Column("microorganism_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("microorganism_code", String(32)),
+    UniqueConstraint("analysis_result_id", "isolate_number", name="uq_microb_isolate_result_number"),
+)
+
+microb_sample_observation = Table(
+    "microb_sample_observation", metadata,
+    Column("sample_observation_id", Integer, primary_key=True, autoincrement=True),
+    Column("sample_id", Integer, ForeignKey("microb_sample.sample_id"), nullable=False),
+    Column("observation_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("observation_code", String(32), nullable=False),
+    UniqueConstraint("sample_id", "observation_code", name="uq_microb_sample_observation"),
+)
+
+microb_isolate_observation = Table(
+    "microb_isolate_observation", metadata,
+    Column("isolate_observation_id", Integer, primary_key=True, autoincrement=True),
+    Column("isolate_id", Integer, ForeignKey("microb_isolate.isolate_id"), nullable=False),
+    Column("observation_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("observation_code", String(32), nullable=False),
+    UniqueConstraint("isolate_id", "observation_code", name="uq_microb_isolate_observation"),
+)
+
+microb_determination = Table(
+    "microb_determination", metadata,
+    Column("determination_id", Integer, primary_key=True, autoincrement=True),
+    Column("sample_analysis_id", Integer, ForeignKey("microb_sample_analysis.sample_analysis_id"), nullable=False),
+    Column("technique_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("technique_code", String(32), nullable=False),
+    Column("qualitative_result_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("qualitative_result_code", String(32)),
+    Column("quantitative_result_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("quantitative_result", String(32)),
+    Column("quantitative_result_literal", String(64)),
+    UniqueConstraint("sample_analysis_id", "technique_code", name="uq_microb_determination"),
+)
+
+microb_susceptibility_result = Table(
+    "microb_susceptibility_result", metadata,
+    Column("susceptibility_result_id", Integer, primary_key=True, autoincrement=True),
+    Column("isolate_id", Integer, ForeignKey("microb_isolate.isolate_id"), nullable=False),
+    Column("antibiotic_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("antibiotic_code", String(16), nullable=False),
+    Column("cmi_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("cmi_code", String(32)),
+    Column("interpretation_id", Integer, ForeignKey("ref_microb_catalog_entry.ref_microb_catalog_entry_id")),
+    Column("interpretation_code", String(8)), Column("cmi_description", String(64)),
+    Column("stg_microb_antibiogram_id", Integer, ForeignKey("stg_microb_antibiogram.stg_microb_antibiogram_id"), nullable=False),
+    UniqueConstraint("isolate_id", "stg_microb_antibiogram_id", name="uq_microb_susceptibility_source"),
+)
+
+microb_normalization_issue = Table(
+    "microb_normalization_issue", metadata,
+    Column("issue_id", Integer, primary_key=True, autoincrement=True),
+    Column("source_id", Integer, nullable=False), Column("run_id", Integer, nullable=False),
+    Column("file_id", Integer, nullable=False), Column("line_id", Integer, nullable=False),
+    Column("staging_table", String(100), nullable=False), Column("staging_id", Integer),
+    Column("field_name", String(100), nullable=False), Column("code", String(100)),
+    Column("severity", String(20), nullable=False), Column("message", Text, nullable=False),
+    UniqueConstraint("staging_table", "staging_id", "field_name", "code", name="uq_microb_micro_issue"),
+)
+
+microb_entity_lineage = Table(
+    "microb_entity_lineage", metadata,
+    Column("lineage_id", Integer, primary_key=True, autoincrement=True),
+    Column("entity_type", String(80), nullable=False), Column("entity_id", Integer, nullable=False),
+    Column("source_id", Integer, nullable=False), Column("run_id", Integer, nullable=False),
+    Column("file_id", Integer, nullable=False), Column("line_id", Integer, nullable=False),
+    Column("staging_table", String(100), nullable=False), Column("staging_id", Integer, nullable=False),
+    UniqueConstraint("entity_type", "entity_id", "staging_table", "staging_id", name="uq_microb_entity_lineage"),
 )
 
 ctl_excel_parse_file = Table(
@@ -409,8 +535,8 @@ pcr_run_attribute = Table(
     Column("attribute_key", String(255), nullable=False),
     Column("attribute_key_normalized", String(255), nullable=False),
     Column("value_json", Text, nullable=True),
-    Column("is_canonical", Boolean, nullable=False, server_default=text("0")),
-    Column("has_conflict", Boolean, nullable=False, server_default=text("0")),
+    Column("is_canonical", Boolean, nullable=False, server_default=text("false")),
+    Column("has_conflict", Boolean, nullable=False, server_default=text("false")),
     UniqueConstraint(
         "file_id", "attribute_key_normalized", name="uq_pcr_run_attribute_file_key"
     ),
@@ -489,7 +615,7 @@ pcr_derivation_run = Table(
     Column("rule_version", String(40), nullable=False),
     Column("parameters_json", Text, nullable=False),
     Column("status", String(30), nullable=False),
-    Column("is_current", Boolean, nullable=False, server_default=text("0")),
+    Column("is_current", Boolean, nullable=False, server_default=text("false")),
     Column("details_json", Text, nullable=True),
     Column(
         "started_at",
@@ -540,6 +666,19 @@ pcr_well_classification = Table(
     Column("rule_key", String(100), nullable=False),
     Column("content_evidence", String(100), nullable=True),
     Column("review_reason", Text, nullable=True),
+)
+
+pcr_microb_well_validation = Table(
+    "pcr_microb_well_validation",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_well_id", Integer, ForeignKey("pcr_well.pcr_well_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id")),
+    Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id")),
+    Column("validation_status", String(50), nullable=False),
+    Column("validation_reason", Text),
+    Column("details_json", Text, nullable=False),
+    Column("validated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
 pcr_run_analysis = Table(
@@ -720,6 +859,111 @@ pcr_result_selection = Table(
     Column("details_json", Text, nullable=False),
 )
 
+pcr_sil_culture_classification = Table(
+    "pcr_sil_culture_classification",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), primary_key=True),
+    Column("sample_analysis_id", Integer, ForeignKey("microb_sample_analysis.sample_analysis_id"), nullable=False),
+    Column("culture_category", String(32), nullable=False),
+    Column("result_codes_json", Text, nullable=False),
+    Column("policy_version", String(64), nullable=False),
+    Column("details_json", Text, nullable=False),
+)
+
+pcr_sil_link_candidate = Table(
+    "pcr_sil_link_candidate",
+    metadata,
+    Column("candidate_id", Integer, primary_key=True, autoincrement=True),
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), nullable=False),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), nullable=False),
+    Column("current_microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), nullable=False),
+    Column("current_isolate_id", Integer, ForeignKey("microb_isolate.isolate_id")),
+    Column("microorganism_code", String(32)),
+    Column("evidence_microb_sample_id", Integer, ForeignKey("microb_sample.sample_id")),
+    Column("evidence_isolate_id", Integer, ForeignKey("microb_isolate.isolate_id")),
+    Column("marker_code", String(16)),
+    Column("candidate_kind", String(32), nullable=False),
+    Column("candidate_status", String(40), nullable=False),
+    Column("days_difference", Integer),
+    Column("negative_count", Integer),
+    Column("policy_version", String(64), nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("details_json", Text, nullable=False),
+)
+
+pcr_sil_result_link = Table(
+    "pcr_sil_result_link",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("run_type", String(20), primary_key=True),
+    Column("canonical_target", String(100), primary_key=True),
+    Column("candidate_id", Integer, ForeignKey("pcr_sil_link_candidate.candidate_id")),
+    Column("link_type", String(32), nullable=False),
+    Column("concordance", String(32), nullable=False),
+    Column("policy_version", String(64), nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("details_json", Text, nullable=False),
+)
+
+pcr_sil_organism_marker_summary = Table(
+    "pcr_sil_organism_marker_summary",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), primary_key=True),
+    Column("microorganism_code", String(32), primary_key=True),
+    Column("oxa_detected", Boolean, nullable=False),
+    Column("kpc_detected", Boolean, nullable=False),
+    Column("ndm_detected", Boolean, nullable=False),
+    Column("vim_detected", Boolean, nullable=False),
+    Column("marker_codes_json", Text, nullable=False),
+    Column("isolate_count", Integer, nullable=False),
+    Column("details_json", Text, nullable=False),
+)
+
+pcr_sil_culture_marker_summary = Table(
+    "pcr_sil_culture_marker_summary",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), primary_key=True),
+    Column("oxa_detected", Boolean, nullable=False),
+    Column("kpc_detected", Boolean, nullable=False),
+    Column("ndm_detected", Boolean, nullable=False),
+    Column("vim_detected", Boolean, nullable=False),
+    Column("marker_codes_json", Text, nullable=False),
+    Column("organism_count", Integer, nullable=False),
+    Column("isolate_count", Integer, nullable=False),
+    Column("details_json", Text, nullable=False),
+)
+
+pcr_sample_result = Table(
+    "pcr_sample_result",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("pcr_category", String(32), nullable=False),
+    Column("decision_source", String(20), nullable=False),
+    Column("warning_code", String(80)),
+    Column("details_json", Text, nullable=False),
+)
+
+pcr_sample_target_metric = Table(
+    "pcr_sample_target_metric",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("pcr_run_id", Integer, ForeignKey("pcr_run.pcr_run_id"), primary_key=True),
+    Column("canonical_target", String(100), primary_key=True),
+    Column("target_interpretation_id", Integer, ForeignKey("pcr_interpretation.interpretation_id"), nullable=False),
+    Column("target_cq", Float),
+    Column("reference_16s_cq", Float),
+    Column("delta_cq", Float),
+    Column("details_json", Text, nullable=False),
+)
+
 pcr_review_action = Table(
     "pcr_review_action",
     metadata,
@@ -763,6 +1007,26 @@ Index("idx_stg_microb_antibiogram_technique", stg_microb_antibiogram.c.stg_micro
 Index("idx_stg_microb_antibiogram_antibiotic", stg_microb_antibiogram.c.cod_atb)
 Index("idx_ref_microb_catalog_current", ref_microb_catalog.c.catalog_name, ref_microb_catalog.c.is_current)
 Index("idx_ref_microb_catalog_entry_code", ref_microb_catalog_entry.c.code)
+Index("idx_microb_lineage_staging", microb_entity_lineage.c.staging_table, microb_entity_lineage.c.staging_id)
+Index("idx_microb_susceptibility_staging", microb_susceptibility_result.c.stg_microb_antibiogram_id)
+Index("idx_microb_sample_number", microb_sample.c.sample_number)
+Index(
+    "idx_microb_analysis_sample_match",
+    microb_sample_analysis.c.sample_id,
+    microb_sample_analysis.c.analysis_code,
+    microb_sample_analysis.c.analysis_kind,
+)
+Index("idx_pcr_microb_validation_status", pcr_microb_well_validation.c.derivation_id, pcr_microb_well_validation.c.validation_status)
+Index("idx_microb_sample_patient_dates", microb_sample.c.patient_id, microb_sample.c.received_at, microb_sample.c.entered_at)
+Index("idx_microb_analysis_pmdr", microb_sample_analysis.c.sample_id, microb_sample_analysis.c.analysis_code, microb_sample_analysis.c.analysis_kind)
+Index("idx_microb_isolate_result_organism", microb_isolate.c.analysis_result_id, microb_isolate.c.microorganism_code)
+Index("idx_microb_susceptibility_marker", microb_susceptibility_result.c.isolate_id, microb_susceptibility_result.c.antibiotic_code, microb_susceptibility_result.c.interpretation_code)
+Index("idx_pcr_sil_classification_derivation", pcr_sil_culture_classification.c.derivation_id, pcr_sil_culture_classification.c.culture_category)
+Index("idx_pcr_sil_candidate_sample", pcr_sil_link_candidate.c.derivation_id, pcr_sil_link_candidate.c.pcr_sample_id, pcr_sil_link_candidate.c.marker_code)
+Index("idx_pcr_sil_organism_marker", pcr_sil_organism_marker_summary.c.derivation_id, pcr_sil_organism_marker_summary.c.microorganism_code)
+Index("idx_pcr_sil_culture_marker", pcr_sil_culture_marker_summary.c.derivation_id, pcr_sil_culture_marker_summary.c.microb_sample_id)
+Index("idx_pcr_sample_result_category", pcr_sample_result.c.derivation_id, pcr_sample_result.c.pcr_category)
+Index("idx_pcr_sample_metric_target", pcr_sample_target_metric.c.derivation_id, pcr_sample_target_metric.c.canonical_target)
 Index(
     "idx_raw_excel_source_entity_run",
     raw_excel_rows.c.source_id,
@@ -817,7 +1081,7 @@ Index(
     "uq_pcr_derivation_run_current",
     pcr_derivation_run.c.is_current,
     unique=True,
-    sqlite_where=pcr_derivation_run.c.is_current.is_(True),
+    postgresql_where=pcr_derivation_run.c.is_current.is_(True),
 )
 Index(
     "idx_pcr_interpretation_run_target",
@@ -844,6 +1108,9 @@ def create_schema(engine: Engine) -> None:
     _upgrade_pcr_run_type(engine)
     _upgrade_pcr_result_selection_run_type(engine)
     _upgrade_pcr_derivation_current(engine)
+    _upgrade_microb_determination_catalogs(engine)
+    _upgrade_microb_sample_analysis_kind(engine)
+    _upgrade_microb_sample_hospital(engine)
     for table in metadata.tables.values():
         for index in table.indexes:
             index.create(engine, checkfirst=True)
@@ -876,19 +1143,21 @@ def _upgrade_pcr_run_metadata(engine: Engine) -> None:
 
 
 def _normalize_pcr_run_datetimes(engine: Engine) -> None:
-    """Convert CFX month/day/year timestamps stored in legacy run metadata."""
+    """Convert legacy CFX timestamps stored as MM/DD/YYYY text."""
 
+    if engine.dialect.name != "postgresql":
+        return
     with engine.begin() as conn:
         for column in ("run_started", "run_ended"):
             conn.execute(
                 text(
                     f"""
                     UPDATE pcr_run
-                    SET {column} = datetime(
-                        substr({column}, 7, 4) || '-' || substr({column}, 1, 2) || '-' ||
-                        substr({column}, 4, 2) || ' ' || substr({column}, 12, 8)
-                    )
-                    WHERE {column} GLOB '??/??/???? ??:??:?? UTC'
+                    SET {column} = to_timestamp(
+                        trim({column}::text), 'MM/DD/YYYY HH24:MI:SS TZ'
+                    )::timestamp
+                    WHERE trim({column}::text) ~
+                        '^[0-9]{{2}}/[0-9]{{2}}/[0-9]{{4}} [0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}} UTC$'
                     """
                 )
             )
@@ -936,12 +1205,81 @@ def _upgrade_pcr_result_selection_run_type(engine: Engine) -> None:
         conn.execute(text("DROP TABLE pcr_result_selection_legacy"))
 
 
+def _upgrade_microb_determination_catalogs(engine: Engine) -> None:
+    """Add the quantitative-result catalog link to existing PostgreSQL schemas."""
+
+    columns = {
+        str(column["name"])
+        for column in inspect(engine).get_columns("microb_determination")
+    }
+    with engine.begin() as conn:
+        if "quantitative_result_id" not in columns:
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE microb_determination
+                    ADD COLUMN quantitative_result_id INTEGER
+                    REFERENCES ref_microb_catalog_entry(ref_microb_catalog_entry_id)
+                    """
+                )
+            )
+        if "quantitative_result_literal" not in columns:
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE microb_determination
+                    ADD COLUMN quantitative_result_literal VARCHAR(64)
+                    """
+                )
+            )
+
+
+def _upgrade_microb_sample_analysis_kind(engine: Engine) -> None:
+    """Add the analysis semantic kind to existing Microb schemas."""
+
+    columns = {
+        str(column["name"])
+        for column in inspect(engine).get_columns("microb_sample_analysis")
+    }
+    if "analysis_kind" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE microb_sample_analysis ADD COLUMN analysis_kind VARCHAR(20)"
+            )
+        )
+
+
+def _upgrade_microb_sample_hospital(engine: Engine) -> None:
+    """Add the catalog-backed hospital relation to existing Microb samples."""
+
+    columns = {
+        str(column["name"])
+        for column in inspect(engine).get_columns("microb_sample")
+    }
+    if "hospital_id" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE microb_sample
+                ADD COLUMN hospital_id INTEGER
+                REFERENCES ref_microb_catalog_entry(ref_microb_catalog_entry_id)
+                """
+            )
+        )
+
+
 def create_views(engine: Engine) -> None:
     """Create the public PCR views managed by the database schema."""
 
+    if engine.dialect.name != "postgresql":
+        return
     current = """
         SELECT derivation_id FROM pcr_derivation_run
-        WHERE status='SUCCESS' AND is_current=1
+        WHERE status='SUCCESS' AND is_current=TRUE
     """
     views = {
         "v_pcr_algorithmic_result": f"""
@@ -972,7 +1310,7 @@ def create_views(engine: Engine) -> None:
                 WHERE item_type='RESULT' AND action IN ('OVERRIDE', 'REVOKE')
             )
             SELECT sample.sample_key, selection.run_type, selection.canonical_target,
-                   COALESCE(json_extract(override.payload_json, '$.call'),
+                   COALESCE((override.payload_json::jsonb ->> 'call'),
                             interpretation.call) AS call,
                    interpretation.cq, interpretation.peak_temperature,
                    interpretation.pcr_run_id, selection.occurrence_count,
@@ -1013,6 +1351,206 @@ def create_views(engine: Engine) -> None:
               ON scope.pcr_run_id=interpretation.pcr_run_id
             WHERE interpretation.derivation_id=({current})
               AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
+        """,
+        "v_pcr_sample_result": f"""
+            SELECT sample.sample_key, result.pcr_category, result.decision_source,
+                   result.warning_code, result.details_json
+            FROM pcr_sample_result AS result
+            JOIN pcr_sample AS sample ON sample.pcr_sample_id=result.pcr_sample_id
+            WHERE result.derivation_id=({current})
+        """,
+        "v_pcr_sample_target_metric": f"""
+            SELECT sample.sample_key, metric.pcr_run_id, metric.canonical_target,
+                   metric.target_cq, metric.reference_16s_cq, metric.delta_cq,
+                   metric.details_json
+            FROM pcr_sample_target_metric AS metric
+            JOIN pcr_sample AS sample ON sample.pcr_sample_id=metric.pcr_sample_id
+            WHERE metric.derivation_id=({current})
+        """,
+        "v_pcr_sil_organism_marker_summary": f"""
+            SELECT sample.sample_key, summary.microorganism_code,
+                   summary.oxa_detected, summary.kpc_detected,
+                   summary.ndm_detected, summary.vim_detected,
+                   summary.marker_codes_json, summary.isolate_count
+            FROM pcr_sil_organism_marker_summary AS summary
+            JOIN pcr_sample AS sample ON sample.pcr_sample_id=summary.pcr_sample_id
+            WHERE summary.derivation_id=({current})
+        """,
+        "v_pcr_sil_culture_marker_summary": f"""
+            SELECT sample.sample_key, summary.oxa_detected, summary.kpc_detected,
+                   summary.ndm_detected, summary.vim_detected,
+                   summary.marker_codes_json, summary.organism_count,
+                   summary.isolate_count
+            FROM pcr_sil_culture_marker_summary AS summary
+            JOIN pcr_sample AS sample ON sample.pcr_sample_id=summary.pcr_sample_id
+            WHERE summary.derivation_id=({current})
+        """,
+        "v_pcr_sil_result_link": f"""
+            SELECT sample.sample_key, link.run_type, link.canonical_target,
+                   link.link_type, link.concordance, link.policy_version,
+                   link.reason, link.details_json,
+                   candidate.candidate_kind, candidate.candidate_status,
+                   candidate.microorganism_code, candidate.marker_code,
+                   candidate.days_difference, candidate.negative_count,
+                   evidence.sample_number AS result_sample,
+                   COALESCE(evidence.received_at, evidence.entered_at) AS result_entry_date,
+                   CASE WHEN link.link_type='DIRECT' THEN TRUE
+                        WHEN link.link_type='PRIOR_COMPATIBLE' THEN FALSE
+                        ELSE NULL END AS result_itself
+            FROM pcr_sil_result_link AS link
+            JOIN pcr_sample AS sample ON sample.pcr_sample_id=link.pcr_sample_id
+            LEFT JOIN pcr_sil_link_candidate AS candidate
+              ON candidate.candidate_id=link.candidate_id
+            LEFT JOIN microb_sample AS evidence
+              ON evidence.sample_id=candidate.evidence_microb_sample_id
+            WHERE link.derivation_id=({current})
+        """,
+        "v_downstream_sil_pcr_global": f"""
+            WITH matched AS (
+                SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
+                FROM pcr_microb_well_validation AS validation
+                WHERE validation.derivation_id=({current})
+                  AND validation.validation_status='MATCH_ELIGIBLE'
+            ), pcr_flags AS (
+                SELECT selection.pcr_sample_id,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SCREENING' AND selection.canonical_target='KPC') AS kpc_screening,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SCREENING' AND selection.canonical_target='NDM') AS ndm_screening,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SCREENING' AND selection.canonical_target='VIM') AS vim_screening,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SCREENING' AND selection.canonical_target='OXA48') AS oxa48_screening,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SPECIFIC' AND selection.canonical_target='KPC') AS kpc_specific,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SPECIFIC' AND selection.canonical_target='NDM') AS ndm_specific,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SPECIFIC' AND selection.canonical_target='VIM') AS vim_specific,
+                       MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SPECIFIC' AND selection.canonical_target='OXA48') AS oxa48_specific
+                FROM pcr_result_selection AS selection
+                LEFT JOIN pcr_interpretation AS interpretation ON interpretation.interpretation_id=selection.preferred_interpretation_id
+                WHERE selection.derivation_id=({current})
+                GROUP BY selection.pcr_sample_id
+            ), metric_ranked AS (
+                SELECT metric.*, ROW_NUMBER() OVER (
+                    PARTITION BY metric.pcr_sample_id, metric.canonical_target
+                    ORDER BY run.run_started DESC NULLS LAST, metric.pcr_run_id DESC
+                ) AS position
+                FROM pcr_sample_target_metric AS metric
+                LEFT JOIN pcr_run AS run ON run.pcr_run_id=metric.pcr_run_id
+                WHERE metric.derivation_id=({current})
+            ), candidate_rows AS (
+                SELECT candidate.pcr_sample_id, candidate.current_microb_sample_id,
+                       candidate.microorganism_code, candidate.candidate_kind,
+                       candidate.marker_code, evidence.sample_number,
+                       COALESCE(evidence.received_at, evidence.entered_at) AS evidence_at,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY candidate.pcr_sample_id
+                         ORDER BY COALESCE(evidence.received_at, evidence.entered_at) DESC NULLS LAST,
+                                  candidate.candidate_id DESC
+                       ) AS position
+                FROM pcr_sil_link_candidate AS candidate
+                JOIN microb_sample AS evidence ON evidence.sample_id=candidate.evidence_microb_sample_id
+                WHERE candidate.derivation_id=({current})
+                  AND candidate.candidate_status='ACCEPTED'
+            ), resolved AS (
+                SELECT pcr_sample_id,
+                       COALESCE(BOOL_OR(marker_code='OXA'), FALSE) AS oxa_detected,
+                       COALESCE(BOOL_OR(marker_code='KPC'), FALSE) AS kpc_detected,
+                       COALESCE(BOOL_OR(marker_code='NDM'), FALSE) AS ndm_detected,
+                       COALESCE(BOOL_OR(marker_code='VIM'), FALSE) AS vim_detected,
+                       BOOL_OR(candidate_kind='PRIOR') AS has_prior,
+                       BOOL_OR(candidate_kind='DIRECT') AS has_direct,
+                       MAX(sample_number) FILTER (WHERE position=1) AS result_sample,
+                       MAX(evidence_at) FILTER (WHERE position=1) AS result_entry_date
+                FROM candidate_rows GROUP BY pcr_sample_id
+            )
+            SELECT patient.nhc, sample.sample_number AS sample, sample.entered_at AS entry_date,
+                   classification.culture_category AS result_interpretate,
+                   COALESCE(resolved.oxa_detected, FALSE)::int AS oxa48,
+                   COALESCE(resolved.vim_detected, FALSE)::int AS vim,
+                   COALESCE(resolved.kpc_detected, FALSE)::int AS kpc,
+                   COALESCE(resolved.ndm_detected, FALSE)::int AS ndm,
+                   (COALESCE(resolved.oxa_detected, FALSE)::int::text || COALESCE(resolved.vim_detected, FALSE)::int::text || COALESCE(resolved.kpc_detected, FALSE)::int::text || COALESCE(resolved.ndm_detected, FALSE)::int::text) AS global_encoded,
+                   resolved.result_sample, resolved.result_entry_date,
+                   CASE WHEN resolved.has_prior THEN FALSE WHEN resolved.has_direct THEN TRUE ELSE NULL END AS result_itself,
+                   origin.code AS origin_code, service.code AS service_code,
+                   service.description AS desc_service, origin.description AS desc_proc,
+                   patient.sex, EXTRACT(YEAR FROM AGE(COALESCE(sample.entered_at, sample.received_at), patient.birth_date))::int AS age,
+                   pcr_flags.kpc_screening, pcr_flags.ndm_screening,
+                   pcr_flags.vim_screening, pcr_flags.oxa48_screening,
+                   CASE WHEN -1 IN (pcr_flags.oxa48_screening, pcr_flags.vim_screening, pcr_flags.kpc_screening, pcr_flags.ndm_screening) THEN 'INVALID'
+                        ELSE (COALESCE(pcr_flags.oxa48_screening, 0)::text || COALESCE(pcr_flags.vim_screening, 0)::text || COALESCE(pcr_flags.kpc_screening, 0)::text || COALESCE(pcr_flags.ndm_screening, 0)::text) END AS encode_carba_screening,
+                   pcr_flags.vim_specific, pcr_flags.ndm_specific,
+                   pcr_flags.oxa48_specific, pcr_flags.kpc_specific,
+                   CASE WHEN -1 IN (pcr_flags.oxa48_specific, pcr_flags.vim_specific, pcr_flags.kpc_specific, pcr_flags.ndm_specific) THEN 'INVALID'
+                        ELSE (COALESCE(pcr_flags.oxa48_specific, 0)::text || COALESCE(pcr_flags.vim_specific, 0)::text || COALESCE(pcr_flags.kpc_specific, 0)::text || COALESCE(pcr_flags.ndm_specific, 0)::text) END AS encode_carba_specific,
+                   vim_metric.delta_cq AS vim_log_delta, ndm_metric.delta_cq AS ndm_log_delta,
+                   oxa_metric.delta_cq AS oxa48_log_delta, kpc_metric.delta_cq AS kpc_log_delta,
+                   result.pcr_category, result.warning_code,
+                   CASE WHEN -1 IN (pcr_flags.oxa48_specific, pcr_flags.vim_specific, pcr_flags.kpc_specific, pcr_flags.ndm_specific) THEN 'INVALID'
+                        ELSE (COALESCE(pcr_flags.oxa48_specific, 0)::text || COALESCE(pcr_flags.vim_specific, 0)::text || COALESCE(pcr_flags.kpc_specific, 0)::text || COALESCE(pcr_flags.ndm_specific, 0)::text) END AS encode_fis,
+                   (COALESCE(resolved.oxa_detected, FALSE)::int::text || COALESCE(resolved.vim_detected, FALSE)::int::text || COALESCE(resolved.kpc_detected, FALSE)::int::text || COALESCE(resolved.ndm_detected, FALSE)::int::text) AS resolved_encoded,
+                   COALESCE(culture.oxa_detected, FALSE)::int AS direct_oxa48,
+                   COALESCE(culture.vim_detected, FALSE)::int AS direct_vim,
+                   COALESCE(culture.kpc_detected, FALSE)::int AS direct_kpc,
+                   COALESCE(culture.ndm_detected, FALSE)::int AS direct_ndm,
+                   (COALESCE(culture.oxa_detected, FALSE)::int::text || COALESCE(culture.vim_detected, FALSE)::int::text || COALESCE(culture.kpc_detected, FALSE)::int::text || COALESCE(culture.ndm_detected, FALSE)::int::text) AS direct_global_encoded
+            FROM pcr_sample_result AS result
+            JOIN matched ON matched.pcr_sample_id=result.pcr_sample_id
+            JOIN microb_sample AS sample ON sample.sample_id=matched.microb_sample_id
+            LEFT JOIN microb_patient AS patient ON patient.patient_id=sample.patient_id
+            LEFT JOIN ref_microb_catalog_entry AS origin ON origin.ref_microb_catalog_entry_id=sample.origin_id
+            LEFT JOIN ref_microb_catalog_entry AS service ON service.ref_microb_catalog_entry_id=sample.service_id
+            LEFT JOIN pcr_sil_culture_classification AS classification ON classification.derivation_id=result.derivation_id AND classification.microb_sample_id=sample.sample_id
+            LEFT JOIN pcr_sil_culture_marker_summary AS culture ON culture.derivation_id=result.derivation_id AND culture.pcr_sample_id=result.pcr_sample_id AND culture.microb_sample_id=sample.sample_id
+            LEFT JOIN pcr_flags ON pcr_flags.pcr_sample_id=result.pcr_sample_id
+            LEFT JOIN resolved ON resolved.pcr_sample_id=result.pcr_sample_id
+            LEFT JOIN metric_ranked AS vim_metric ON vim_metric.pcr_sample_id=result.pcr_sample_id AND vim_metric.canonical_target='VIM' AND vim_metric.position=1
+            LEFT JOIN metric_ranked AS ndm_metric ON ndm_metric.pcr_sample_id=result.pcr_sample_id AND ndm_metric.canonical_target='NDM' AND ndm_metric.position=1
+            LEFT JOIN metric_ranked AS oxa_metric ON oxa_metric.pcr_sample_id=result.pcr_sample_id AND oxa_metric.canonical_target='OXA48' AND oxa_metric.position=1
+            LEFT JOIN metric_ranked AS kpc_metric ON kpc_metric.pcr_sample_id=result.pcr_sample_id AND kpc_metric.canonical_target='KPC' AND kpc_metric.position=1
+            WHERE result.derivation_id=({current})
+        """,
+        "v_downstream_sil_pcr_organism": f"""
+            WITH resolved_organism AS (
+                SELECT candidate.pcr_sample_id, candidate.current_microb_sample_id,
+                       candidate.microorganism_code,
+                       COALESCE(BOOL_OR(candidate.marker_code='OXA'), FALSE) AS oxa_detected,
+                       COALESCE(BOOL_OR(candidate.marker_code='KPC'), FALSE) AS kpc_detected,
+                       COALESCE(BOOL_OR(candidate.marker_code='NDM'), FALSE) AS ndm_detected,
+                       COALESCE(BOOL_OR(candidate.marker_code='VIM'), FALSE) AS vim_detected
+                FROM pcr_sil_link_candidate AS candidate
+                WHERE candidate.derivation_id=({current})
+                  AND candidate.candidate_status='ACCEPTED'
+                GROUP BY candidate.pcr_sample_id, candidate.current_microb_sample_id,
+                         candidate.microorganism_code
+            )
+            SELECT summary_global.*, organism.microorganism_code AS microorg_code,
+                   microorganism.description AS microorg_name,
+                   COALESCE(resolved_organism.oxa_detected, FALSE)::int AS organism_oxa48,
+                   COALESCE(resolved_organism.vim_detected, FALSE)::int AS organism_vim,
+                   COALESCE(resolved_organism.kpc_detected, FALSE)::int AS organism_kpc,
+                   COALESCE(resolved_organism.ndm_detected, FALSE)::int AS organism_ndm,
+                   (COALESCE(resolved_organism.oxa_detected, FALSE)::int::text || COALESCE(resolved_organism.vim_detected, FALSE)::int::text || COALESCE(resolved_organism.kpc_detected, FALSE)::int::text || COALESCE(resolved_organism.ndm_detected, FALSE)::int::text) AS encoded_carba_org,
+                   organism.isolate_count,
+                   organism.oxa_detected::int AS direct_organism_oxa48,
+                   organism.vim_detected::int AS direct_organism_vim,
+                   organism.kpc_detected::int AS direct_organism_kpc,
+                   organism.ndm_detected::int AS direct_organism_ndm
+            FROM v_downstream_sil_pcr_global AS summary_global
+            JOIN pcr_sample AS pcr_sample ON pcr_sample.sample_key=summary_global.sample
+            JOIN pcr_sil_organism_marker_summary AS organism
+              ON organism.derivation_id=({current}) AND organism.pcr_sample_id=pcr_sample.pcr_sample_id
+            LEFT JOIN resolved_organism
+              ON resolved_organism.pcr_sample_id=organism.pcr_sample_id
+             AND resolved_organism.current_microb_sample_id=organism.microb_sample_id
+             AND resolved_organism.microorganism_code=organism.microorganism_code
+            LEFT JOIN LATERAL (
+                SELECT entry.description
+                FROM ref_microb_catalog_entry AS entry
+                JOIN ref_microb_catalog AS catalog
+                  ON catalog.ref_microb_catalog_id=entry.ref_microb_catalog_id
+                WHERE catalog.catalog_name='microorg'
+                  AND entry.code=organism.microorganism_code
+                ORDER BY catalog.is_current DESC, entry.ref_microb_catalog_entry_id DESC
+                LIMIT 1
+            ) AS microorganism ON TRUE
+            WHERE organism.derivation_id=({current})
         """,
         "v_pcr_run_qc": f"""
             SELECT run_qc.*, run.run_name FROM pcr_run_qc AS run_qc
@@ -1067,13 +1605,18 @@ def create_views(engine: Engine) -> None:
             UNION ALL
             SELECT 'RESULT', CAST(pcr_sample_id AS TEXT) || ':' || run_type || ':' || canonical_target,
                    concordance FROM pcr_result_selection
-            WHERE needs_review=1 AND derivation_id=({current})
+            WHERE needs_review=TRUE AND derivation_id=({current})
         """,
     }
     with engine.begin() as conn:
         conn.execute(text("DROP VIEW IF EXISTS v_pcr_current_result"))
-        for name, select_sql in views.items():
+        # Some public views build on preceding views (for example, the
+        # organism-level downstream view uses the global downstream view).
+        # Drop in reverse declaration order, then recreate in declaration
+        # order, so refreshes remain explicit and never need DROP CASCADE.
+        for name in reversed(views):
             conn.execute(text(f"DROP VIEW IF EXISTS {name}"))
+        for name, select_sql in views.items():
             conn.execute(text(f"CREATE VIEW {name} AS {select_sql}"))
 
 
@@ -1099,7 +1642,7 @@ def _upgrade_pcr_derivation_current(engine: Engine) -> None:
             text(
                 """
                 UPDATE pcr_derivation_run
-                SET is_current=1
+                SET is_current=TRUE
                 WHERE derivation_id=(
                     SELECT MAX(derivation_id) FROM pcr_derivation_run
                     WHERE status='SUCCESS'

@@ -563,19 +563,48 @@ def test_analytics_job_is_a_facade_over_injected_collaborators() -> None:
     pipeline.evaluate_qc.return_value = 4
     pipeline.associate_episodes.return_value = 2
     pipeline.select_results.return_value = 5
+    repository.classify_promoted_sample_results.return_value = 6
+    repository.summarize_sil_culture_markers.return_value = 7
+    stages: list[tuple[str, bool]] = []
 
     stats = PCRAnalyticsJob(repository=repository, pipeline=pipeline).run(
         algorithm_version="test-facade",
         rebuild=True,
+        on_stage=lambda label, completed: stages.append((label, completed)),
     )
 
     assert stats.derivation_id == 42
     assert stats.wells_classified == 10
     assert stats.result_groups == 5
+    assert stats.sample_results == 6
+    assert stats.sil_culture_summaries == 7
+    assert stats.sil_links == repository.link_sil_results.return_value
     repository.start_derivation.assert_called_once()
     pipeline.classify_runs.assert_called_once_with(42)
     pipeline.set_overrides.assert_called_once_with([])
     repository.finish_derivation.assert_called_once()
+    assert stages == [
+        ("Classifying PCR wells", False),
+        ("Classifying PCR wells", True),
+        ("Validating PCR–Microb matches", False),
+        ("Validating PCR–Microb matches", True),
+        ("Classifying PCR runs", False),
+        ("Classifying PCR runs", True),
+        ("Interpreting melting curves", False),
+        ("Interpreting melting curves", True),
+        ("Evaluating PCR QC", False),
+        ("Evaluating PCR QC", True),
+        ("Associating PCR episodes", False),
+        ("Associating PCR episodes", True),
+        ("Selecting PCR results", False),
+        ("Selecting PCR results", True),
+        ("Classifying promoted PCR samples", False),
+        ("Classifying promoted PCR samples", True),
+        ("Linking PCR results to SIL evidence", False),
+        ("Linking PCR results to SIL evidence", True),
+        ("Aggregating direct SIL culture markers", False),
+        ("Aggregating direct SIL culture markers", True),
+    ]
 
 
 def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> None:

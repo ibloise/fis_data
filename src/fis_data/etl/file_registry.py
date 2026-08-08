@@ -63,6 +63,6 @@ def register_file(
                 file_format=file_format,
                 sha256=checksum,
                 status="REGISTERED",
-            )
+            ).returning(ctl_file_registry.c.file_id)
         )
-        return int(result.lastrowid)
+        return int(result.scalar_one())

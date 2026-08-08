@@ -6,10 +6,10 @@ from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 
-from ..schema import raw_text_lines, stg_microb_antibiogram, stg_microb_technique
+from ...schema import raw_text_lines, stg_microb_antibiogram, stg_microb_technique
 
 
 class MicrobStagingRepository:

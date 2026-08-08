@@ -1,4 +1,4 @@
-"""Header utilities for positional text exports."""
+"""Header utilities for positional Microb text exports."""
 
 from __future__ import annotations
 

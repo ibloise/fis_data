@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from fis_data.etl.parse.header_index import HeaderIndex
-from fis_data.etl.parse.microb_parser import (
+from fis_data.etl.microb.header_index import HeaderIndex
+from fis_data.etl.microb.parser import (
     MicrobExportLine,
     MicrobParser,
     format_cycle_list,

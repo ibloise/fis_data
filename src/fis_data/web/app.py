@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from ..db import DBSettings, get_engine
+from ..db import get_engine, get_db_settings
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -22,7 +22,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
     """Create the browser application with an injected or configured database."""
 
     # TODO(frontend): move these read queries into a dedicated PCR review repository.
-    engine = get_engine(DBSettings(url=database_url)) if database_url else get_engine()
+    engine = get_engine(get_db_settings(database_url))
     app = FastAPI(title="FIS PCR review", version="0.1.0")
     app.state.engine = engine
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -49,7 +49,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                       ON analysis.pcr_run_id=run.pcr_run_id
                      AND analysis.derivation_id=(
                         SELECT derivation_id FROM pcr_derivation_run
-                        WHERE status='SUCCESS' AND is_current=1
+                        WHERE status='SUCCESS' AND is_current=TRUE
                      )
                     WHERE lower(run.run_name) LIKE :pattern
                     ORDER BY run.run_started DESC, run.pcr_run_id DESC
@@ -59,6 +59,96 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                 {"pattern": pattern, "limit": limit},
             ).mappings()
             return [_row(row) for row in rows]
+
+    @app.get("/api/pcr/samples/{sample_number}/runs")
+    def sample_runs(sample_number: str) -> list[dict[str, Any]]:
+        """Return current-derivation runs in which one exact sample was present."""
+
+        normalized = sample_number.strip()
+        if not normalized:
+            raise HTTPException(status_code=400, detail="sample_number is required")
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT DISTINCT sample.sample_key AS sample_number,
+                           run.pcr_run_id, run.run_name, run.run_started,
+                           analysis.run_class, analysis.run_type
+                    FROM pcr_sample AS sample
+                    JOIN pcr_well_classification AS classification
+                      ON classification.pcr_sample_id=sample.pcr_sample_id
+                    JOIN pcr_well AS well
+                      ON well.pcr_well_id=classification.pcr_well_id
+                    JOIN pcr_run AS run ON run.pcr_run_id=well.pcr_run_id
+                    LEFT JOIN pcr_run_analysis AS analysis
+                      ON analysis.pcr_run_id=run.pcr_run_id
+                     AND analysis.derivation_id=(
+                        SELECT derivation_id FROM pcr_derivation_run
+                        WHERE status='SUCCESS' AND is_current=TRUE
+                     )
+                    WHERE sample.sample_key=:sample_number
+                      AND classification.derivation_id=(
+                        SELECT derivation_id FROM pcr_derivation_run
+                        WHERE status='SUCCESS' AND is_current=TRUE
+                      )
+                    ORDER BY run.run_started, run.pcr_run_id
+                    """
+                ),
+                {"sample_number": normalized},
+            ).mappings()
+            return [_row(row) for row in rows]
+
+    @app.get("/api/pcr/samples/{sample_number}/results")
+    def sample_results(sample_number: str) -> list[dict[str, Any]]:
+        """Return Cq and melting-call evidence for one current PCR sample."""
+
+        normalized = sample_number.strip()
+        if not normalized:
+            raise HTTPException(status_code=400, detail="sample_number is required")
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT run.pcr_run_id, run.run_name, run.run_started, well.well,
+                           interpretation.source_target, interpretation.canonical_target,
+                           interpretation.call, interpretation.cq,
+                           interpretation.peak_temperature, interpretation.peak_deriv_rfu,
+                           interpretation.peaks_json, interpretation.error,
+                           qc.is_valid AS target_qc_valid,
+                           selection.run_type AS promoted_run_type,
+                           (selection.preferred_interpretation_id IS NOT NULL) AS is_promoted
+                    FROM pcr_sample AS sample
+                    JOIN pcr_well_classification AS classification
+                      ON classification.pcr_sample_id=sample.pcr_sample_id
+                    JOIN pcr_interpretation AS interpretation
+                      ON interpretation.derivation_id=classification.derivation_id
+                     AND interpretation.pcr_well_id=classification.pcr_well_id
+                    JOIN pcr_well AS well ON well.pcr_well_id=interpretation.pcr_well_id
+                    JOIN pcr_run AS run ON run.pcr_run_id=interpretation.pcr_run_id
+                    LEFT JOIN pcr_target_qc AS qc
+                      ON qc.derivation_id=interpretation.derivation_id
+                     AND qc.pcr_run_id=interpretation.pcr_run_id
+                     AND qc.canonical_target=interpretation.canonical_target
+                    LEFT JOIN pcr_result_selection AS selection
+                      ON selection.derivation_id=interpretation.derivation_id
+                     AND selection.pcr_sample_id=classification.pcr_sample_id
+                     AND selection.canonical_target=interpretation.canonical_target
+                     AND selection.preferred_interpretation_id=interpretation.interpretation_id
+                    WHERE sample.sample_key=:sample_number
+                      AND classification.derivation_id=(
+                        SELECT derivation_id FROM pcr_derivation_run
+                        WHERE status='SUCCESS' AND is_current=TRUE
+                      )
+                    ORDER BY run.run_started, run.pcr_run_id, well.well,
+                             interpretation.canonical_target
+                    """
+                ),
+                {"sample_number": normalized},
+            ).mappings()
+            return [
+                {**_row(row), "peaks": json.loads(str(row["peaks_json"]))}
+                for row in rows
+            ]
 
     @app.get("/api/pcr/runs/{run_id}/filters")
     def curve_filters(run_id: int) -> dict[str, list[str]]:
@@ -128,7 +218,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
     @app.get("/api/pcr/qc")
     def quality_control(run_id: int | None = None) -> list[dict[str, Any]]:
         where = [
-            "qc.derivation_id=(SELECT derivation_id FROM pcr_derivation_run WHERE status='SUCCESS' AND is_current=1)"
+            "qc.derivation_id=(SELECT derivation_id FROM pcr_derivation_run WHERE status='SUCCESS' AND is_current=TRUE)"
         ]
         params: dict[str, Any] = {}
         if run_id is not None:
@@ -170,6 +260,33 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                     """
                 ),
                 {"run_id": run_id, "target": target},
+            ).mappings()
+            return [_row(row) for row in rows]
+
+    @app.get("/api/pcr/review-queue")
+    def review_queue() -> list[dict[str, Any]]:
+        """Return analytical items requiring review or carrying an invalid state."""
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT item_type, item_id, reason, NULL::text AS details_json
+                    FROM v_pcr_review_queue
+                    UNION ALL
+                    SELECT 'SAMPLE_RESULT' AS item_type, sample.sample_key AS item_id,
+                           COALESCE(result.warning_code, result.pcr_category) AS reason,
+                           result.details_json
+                    FROM pcr_sample_result AS result
+                    JOIN pcr_sample AS sample ON sample.pcr_sample_id=result.pcr_sample_id
+                    WHERE result.derivation_id=(
+                        SELECT derivation_id FROM pcr_derivation_run
+                        WHERE status='SUCCESS' AND is_current=TRUE
+                    )
+                      AND (result.warning_code IS NOT NULL OR result.pcr_category='PCR_UNCLASSIFIED')
+                    ORDER BY item_type, item_id
+                    """
+                )
             ).mappings()
             return [_row(row) for row in rows]
 

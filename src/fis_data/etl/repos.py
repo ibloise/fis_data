@@ -6,8 +6,16 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, func, insert, select, update
 from sqlalchemy.engine import Engine
+
+from fis_data.schema import (
+    ctl_excel_parse_file,
+    ctl_excel_parse_sheet,
+    ctl_file_registry,
+    raw_excel_rows,
+    raw_text_lines,
+)
 
 from .types import (
     ExcelFileMetadata,
@@ -29,78 +37,68 @@ class RawTextLinesRepository:
     def get_file_headers(self, *, file_id: int) -> HeaderSet:
         """Fetch header rows for a file."""
 
-        query = text(
-            """
-            SELECT raw_line
-            FROM raw_text_lines
-            WHERE file_id = :file_id
-              AND is_header = 1
-            ORDER BY line_no ASC
-            """
+        query = (
+            select(raw_text_lines.c.raw_line)
+            .where(
+                raw_text_lines.c.file_id == file_id,
+                raw_text_lines.c.is_header.is_(True),
+            )
+            .order_by(raw_text_lines.c.line_no.asc())
         )
         with self.engine.begin() as conn:
-            rows = conn.execute(query, {"file_id": file_id}).fetchall()
+            rows = conn.execute(query).scalars().all()
 
         if not rows:
             raise ValueError(f"No headers found for file_id={file_id}")
 
-        return HeaderSet(lines=tuple(str(row[0]) for row in rows[:2]))
+        return HeaderSet(lines=tuple(str(row) for row in rows[:2]))
 
     def list_pending_file_ids(self, *, entity_name: str) -> list[int]:
         """Return file IDs with pending raw text rows for an entity."""
 
-        query = text(
-            """
-            SELECT DISTINCT file_id
-            FROM raw_text_lines
-            WHERE entity_name = :entity_name
-              AND is_header = 0
-              AND parse_status = 'RAW_ONLY'
-            ORDER BY file_id ASC
-            """
+        query = (
+            select(raw_text_lines.c.file_id)
+            .where(
+                raw_text_lines.c.entity_name == entity_name,
+                raw_text_lines.c.is_header.is_(False),
+                raw_text_lines.c.parse_status == "RAW_ONLY",
+            )
+            .distinct()
+            .order_by(raw_text_lines.c.file_id.asc())
         )
         with self.engine.begin() as conn:
-            rows = conn.execute(query, {"entity_name": entity_name}).fetchall()
+            rows = conn.execute(query).scalars().all()
 
-        return [int(row[0]) for row in rows]
+        return [int(row) for row in rows]
 
     def list_file_ids(self, *, entity_name: str) -> list[int]:
         """Return all file IDs with non-header raw text rows for an entity."""
 
-        query = text(
-            """
-            SELECT DISTINCT file_id
-            FROM raw_text_lines
-            WHERE entity_name = :entity_name
-              AND is_header = 0
-            ORDER BY file_id ASC
-            """
+        query = (
+            select(raw_text_lines.c.file_id)
+            .where(
+                raw_text_lines.c.entity_name == entity_name,
+                raw_text_lines.c.is_header.is_(False),
+            )
+            .distinct()
+            .order_by(raw_text_lines.c.file_id.asc())
         )
         with self.engine.begin() as conn:
-            rows = conn.execute(query, {"entity_name": entity_name}).fetchall()
+            rows = conn.execute(query).scalars().all()
 
-        return [int(row[0]) for row in rows]
+        return [int(row) for row in rows]
 
     def count_parse_candidates(self, *, entity_name: str, file_id: int) -> int:
         """Count pending non-header rows for a file."""
 
-        query = text(
-            """
-            SELECT COUNT(*)
-            FROM raw_text_lines
-            WHERE entity_name = :entity_name
-              AND file_id = :file_id
-              AND is_header = 0
-              AND parse_status = 'RAW_ONLY'
-            """
+        query = select(func.count()).select_from(raw_text_lines).where(
+            raw_text_lines.c.entity_name == entity_name,
+            raw_text_lines.c.file_id == file_id,
+            raw_text_lines.c.is_header.is_(False),
+            raw_text_lines.c.parse_status == "RAW_ONLY",
         )
         with self.engine.begin() as conn:
-            return int(
-                conn.execute(
-                    query,
-                    {"entity_name": entity_name, "file_id": file_id},
-                ).scalar_one()
-            )
+            return int(conn.execute(query).scalar_one())
 
     def fetch_batch_after_line_no(
         self,
@@ -113,30 +111,26 @@ class RawTextLinesRepository:
     ) -> list[RawTextLineRow]:
         """Fetch a keyset-paginated batch of pending non-header rows."""
 
-        query = text(
-            """
-            SELECT line_id, line_no, raw_line
-            FROM raw_text_lines
-            WHERE entity_name = :entity_name
-              AND file_id = :file_id
-              AND is_header = 0
-              AND (:only_pending = 0 OR parse_status = 'RAW_ONLY')
-              AND line_no > :last_line_no
-            ORDER BY line_no ASC
-            LIMIT :limit
-            """
+        conditions = [
+            raw_text_lines.c.entity_name == entity_name,
+            raw_text_lines.c.file_id == file_id,
+            raw_text_lines.c.is_header.is_(False),
+            raw_text_lines.c.line_no > last_line_no,
+        ]
+        if only_pending:
+            conditions.append(raw_text_lines.c.parse_status == "RAW_ONLY")
+        query = (
+            select(
+                raw_text_lines.c.line_id,
+                raw_text_lines.c.line_no,
+                raw_text_lines.c.raw_line,
+            )
+            .where(*conditions)
+            .order_by(raw_text_lines.c.line_no.asc())
+            .limit(limit)
         )
         with self.engine.begin() as conn:
-            rows = conn.execute(
-                query,
-                {
-                    "entity_name": entity_name,
-                    "file_id": file_id,
-                    "limit": limit,
-                    "last_line_no": last_line_no,
-                    "only_pending": int(only_pending),
-                },
-            ).fetchall()
+            rows = conn.execute(query).all()
 
         return [
             RawTextLineRow(
@@ -154,18 +148,18 @@ class RawTextLinesRepository:
         if not updates_list:
             return
 
-        query = text(
-            """
-            UPDATE raw_text_lines
-            SET payload_json = :payload_json,
-                parse_status = :parse_status,
-                parse_error = :parse_error
-            WHERE line_id = :line_id
-            """
+        query = (
+            update(raw_text_lines)
+            .where(raw_text_lines.c.line_id == bindparam("b_line_id"))
+            .values(
+                payload_json=bindparam("payload_json"),
+                parse_status=bindparam("parse_status"),
+                parse_error=bindparam("parse_error"),
+            )
         )
         payload = [
             {
-                "line_id": update.line_id,
+                "b_line_id": update.line_id,
                 "payload_json": update.payload_json,
                 "parse_status": update.status.value,
                 "parse_error": update.error,
@@ -193,42 +187,36 @@ class RawExcelRowsRepository:
     ) -> list[int]:
         """Return Excel file IDs with candidate rows for an entity."""
 
-        query = text(
-            """
-            SELECT DISTINCT file_id
-            FROM raw_excel_rows
-            WHERE entity_name = :entity_name
-              AND (:only_pending = 0 OR parse_status = 'RAW_ONLY')
-              AND (:file_id IS NULL OR file_id = :file_id)
-              AND (:sheet_name IS NULL OR sheet_name = :sheet_name)
-            ORDER BY file_id ASC
-            """
+        conditions = [raw_excel_rows.c.entity_name == entity_name]
+        if only_pending:
+            conditions.append(raw_excel_rows.c.parse_status == "RAW_ONLY")
+        if file_id is not None:
+            conditions.append(raw_excel_rows.c.file_id == file_id)
+        if sheet_name is not None:
+            conditions.append(raw_excel_rows.c.sheet_name == sheet_name)
+        query = (
+            select(raw_excel_rows.c.file_id)
+            .where(*conditions)
+            .distinct()
+            .order_by(raw_excel_rows.c.file_id.asc())
         )
         with self.engine.begin() as conn:
-            rows = conn.execute(
-                query,
-                {
-                    "entity_name": entity_name,
-                    "only_pending": int(only_pending),
-                    "file_id": file_id,
-                    "sheet_name": sheet_name,
-                },
-            ).fetchall()
+            rows = conn.execute(query).scalars().all()
 
-        return [int(row[0]) for row in rows]
+        return [int(row) for row in rows]
 
     def get_file_metadata(self, *, file_id: int) -> ExcelFileMetadata:
         """Fetch registered file metadata for an Excel workbook."""
 
-        query = text(
-            """
-            SELECT file_id, source_name, storage_path, file_format, sha256
-            FROM ctl_file_registry
-            WHERE file_id = :file_id
-            """
-        )
+        query = select(
+            ctl_file_registry.c.file_id,
+            ctl_file_registry.c.source_name,
+            ctl_file_registry.c.storage_path,
+            ctl_file_registry.c.file_format,
+            ctl_file_registry.c.sha256,
+        ).where(ctl_file_registry.c.file_id == file_id)
         with self.engine.begin() as conn:
-            row = conn.execute(query, {"file_id": file_id}).one_or_none()
+            row = conn.execute(query).one_or_none()
 
         if row is None:
             raise ValueError(f"No registered file found for file_id={file_id}")
@@ -251,29 +239,24 @@ class RawExcelRowsRepository:
     ) -> list[str]:
         """Return sheet names with candidate rows for a file."""
 
-        query = text(
-            """
-            SELECT DISTINCT sheet_name
-            FROM raw_excel_rows
-            WHERE entity_name = :entity_name
-              AND file_id = :file_id
-              AND (:only_pending = 0 OR parse_status = 'RAW_ONLY')
-              AND (:sheet_name IS NULL OR sheet_name = :sheet_name)
-            ORDER BY sheet_name ASC
-            """
+        conditions = [
+            raw_excel_rows.c.entity_name == entity_name,
+            raw_excel_rows.c.file_id == file_id,
+        ]
+        if only_pending:
+            conditions.append(raw_excel_rows.c.parse_status == "RAW_ONLY")
+        if sheet_name is not None:
+            conditions.append(raw_excel_rows.c.sheet_name == sheet_name)
+        query = (
+            select(raw_excel_rows.c.sheet_name)
+            .where(*conditions)
+            .distinct()
+            .order_by(raw_excel_rows.c.sheet_name.asc())
         )
         with self.engine.begin() as conn:
-            rows = conn.execute(
-                query,
-                {
-                    "entity_name": entity_name,
-                    "file_id": file_id,
-                    "only_pending": int(only_pending),
-                    "sheet_name": sheet_name,
-                },
-            ).fetchall()
+            rows = conn.execute(query).scalars().all()
 
-        return [str(row[0]) for row in rows]
+        return [str(row) for row in rows]
 
     def fetch_sheet_rows(
         self,
@@ -285,27 +268,25 @@ class RawExcelRowsRepository:
     ) -> list[RawExcelRow]:
         """Fetch raw Excel rows for one sheet."""
 
-        query = text(
-            """
-            SELECT row_id, sheet_name, row_no, raw_values_json
-            FROM raw_excel_rows
-            WHERE entity_name = :entity_name
-              AND file_id = :file_id
-              AND sheet_name = :sheet_name
-              AND (:only_pending = 0 OR parse_status = 'RAW_ONLY')
-            ORDER BY row_no ASC
-            """
+        conditions = [
+            raw_excel_rows.c.entity_name == entity_name,
+            raw_excel_rows.c.file_id == file_id,
+            raw_excel_rows.c.sheet_name == sheet_name,
+        ]
+        if only_pending:
+            conditions.append(raw_excel_rows.c.parse_status == "RAW_ONLY")
+        query = (
+            select(
+                raw_excel_rows.c.row_id,
+                raw_excel_rows.c.sheet_name,
+                raw_excel_rows.c.row_no,
+                raw_excel_rows.c.raw_values_json,
+            )
+            .where(*conditions)
+            .order_by(raw_excel_rows.c.row_no.asc())
         )
         with self.engine.begin() as conn:
-            rows = conn.execute(
-                query,
-                {
-                    "entity_name": entity_name,
-                    "file_id": file_id,
-                    "sheet_name": sheet_name,
-                    "only_pending": int(only_pending),
-                },
-            ).fetchall()
+            rows = conn.execute(query).all()
 
         return [
             RawExcelRow(
@@ -324,18 +305,18 @@ class RawExcelRowsRepository:
         if not updates_list:
             return
 
-        query = text(
-            """
-            UPDATE raw_excel_rows
-            SET payload_json = :payload_json,
-                parse_status = :parse_status,
-                parse_error = :parse_error
-            WHERE row_id = :row_id
-            """
+        query = (
+            update(raw_excel_rows)
+            .where(raw_excel_rows.c.row_id == bindparam("b_row_id"))
+            .values(
+                payload_json=bindparam("payload_json"),
+                parse_status=bindparam("parse_status"),
+                parse_error=bindparam("parse_error"),
+            )
         )
         payload = [
             {
-                "row_id": update.row_id,
+                "b_row_id": update.row_id,
                 "payload_json": update.payload_json,
                 "parse_status": update.status.value,
                 "parse_error": update.error,
@@ -360,33 +341,19 @@ class RawExcelRowsRepository:
     ) -> int:
         """Create an Excel file parse audit record."""
 
-        query = text(
-            """
-            INSERT INTO ctl_excel_parse_file (
-                run_id, file_id, entity_name, file_kind, parser_name,
-                parser_version, status, details_json
-            )
-            VALUES (
-                :run_id, :file_id, :entity_name, :file_kind, :parser_name,
-                :parser_version, :status, :details_json
-            )
-            """
-        )
+        query = insert(ctl_excel_parse_file).values(
+            run_id=run_id,
+            file_id=file_id,
+            entity_name=entity_name,
+            file_kind=file_kind,
+            parser_name=parser_name,
+            parser_version=parser_version,
+            status=status.value,
+            details_json=_json_dumps(details),
+        ).returning(ctl_excel_parse_file.c.excel_file_parse_id)
         with self.engine.begin() as conn:
-            result = conn.execute(
-                query,
-                {
-                    "run_id": run_id,
-                    "file_id": file_id,
-                    "entity_name": entity_name,
-                    "file_kind": file_kind,
-                    "parser_name": parser_name,
-                    "parser_version": parser_version,
-                    "status": status.value,
-                    "details_json": _json_dumps(details),
-                },
-            )
-            return int(result.lastrowid)
+            result = conn.execute(query)
+            return int(result.scalar_one())
 
     def finish_file_audit(
         self,
@@ -403,36 +370,25 @@ class RawExcelRowsRepository:
     ) -> None:
         """Finalize an Excel file parse audit record."""
 
-        query = text(
-            """
-            UPDATE ctl_excel_parse_file
-            SET status = :status,
-                sheets_seen = :sheets_seen,
-                sheets_parsed = :sheets_parsed,
-                rows_seen = :rows_seen,
-                rows_parsed = :rows_parsed,
-                rows_error = :rows_error,
-                error = :error,
-                details_json = :details_json,
-                finished_at = CURRENT_TIMESTAMP
-            WHERE excel_file_parse_id = :excel_file_parse_id
-            """
+        query = (
+            update(ctl_excel_parse_file)
+            .where(
+                ctl_excel_parse_file.c.excel_file_parse_id == excel_file_parse_id
+            )
+            .values(
+                status=status.value,
+                sheets_seen=sheets_seen,
+                sheets_parsed=sheets_parsed,
+                rows_seen=rows_seen,
+                rows_parsed=rows_parsed,
+                rows_error=rows_error,
+                error=error,
+                details_json=_json_dumps(details),
+                finished_at=func.current_timestamp(),
+            )
         )
         with self.engine.begin() as conn:
-            conn.execute(
-                query,
-                {
-                    "excel_file_parse_id": excel_file_parse_id,
-                    "status": status.value,
-                    "sheets_seen": sheets_seen,
-                    "sheets_parsed": sheets_parsed,
-                    "rows_seen": rows_seen,
-                    "rows_parsed": rows_parsed,
-                    "rows_error": rows_error,
-                    "error": error,
-                    "details_json": _json_dumps(details),
-                },
-            )
+            conn.execute(query)
 
     def insert_sheet_audit(
         self,
@@ -454,41 +410,26 @@ class RawExcelRowsRepository:
     ) -> int:
         """Create a completed Excel sheet parse audit record."""
 
-        query = text(
-            """
-            INSERT INTO ctl_excel_parse_sheet (
-                excel_file_parse_id, run_id, file_id, entity_name, sheet_name,
-                sheet_kind, header_row_no, status, rows_seen, rows_parsed,
-                rows_skipped, rows_error, error, details_json, finished_at
-            )
-            VALUES (
-                :excel_file_parse_id, :run_id, :file_id, :entity_name, :sheet_name,
-                :sheet_kind, :header_row_no, :status, :rows_seen, :rows_parsed,
-                :rows_skipped, :rows_error, :error, :details_json, CURRENT_TIMESTAMP
-            )
-            """
-        )
+        query = insert(ctl_excel_parse_sheet).values(
+            excel_file_parse_id=excel_file_parse_id,
+            run_id=run_id,
+            file_id=file_id,
+            entity_name=entity_name,
+            sheet_name=sheet_name,
+            sheet_kind=sheet_kind,
+            header_row_no=header_row_no,
+            status=status.value,
+            rows_seen=rows_seen,
+            rows_parsed=rows_parsed,
+            rows_skipped=rows_skipped,
+            rows_error=rows_error,
+            error=error,
+            details_json=_json_dumps(details),
+            finished_at=func.current_timestamp(),
+        ).returning(ctl_excel_parse_sheet.c.excel_sheet_parse_id)
         with self.engine.begin() as conn:
-            result = conn.execute(
-                query,
-                {
-                    "excel_file_parse_id": excel_file_parse_id,
-                    "run_id": run_id,
-                    "file_id": file_id,
-                    "entity_name": entity_name,
-                    "sheet_name": sheet_name,
-                    "sheet_kind": sheet_kind,
-                    "header_row_no": header_row_no,
-                    "status": status.value,
-                    "rows_seen": rows_seen,
-                    "rows_parsed": rows_parsed,
-                    "rows_skipped": rows_skipped,
-                    "rows_error": rows_error,
-                    "error": error,
-                    "details_json": _json_dumps(details),
-                },
-            )
-            return int(result.lastrowid)
+            result = conn.execute(query)
+            return int(result.scalar_one())
 
 
 def _json_dumps(value: dict[str, Any] | None) -> str | None:

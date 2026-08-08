@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
@@ -26,6 +27,7 @@ from .domain import (
 from .models import ResultCandidate
 from .pipeline import PCRAnalyticsPipeline, _json
 from .repository import PCRAnalyticsRepository
+from .sil_linking import SILLinkingPolicy
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,9 @@ class DerivationStats:
     target_qc_rows: int
     episodes: int
     result_groups: int
+    sample_results: int
+    sil_culture_summaries: int
+    sil_links: int
     review_items: int
 
 
@@ -78,10 +83,13 @@ class PCRAnalyticsJob:
         rebuild: bool = False,
         ignore_overrides: bool = False,
         experimental_before: datetime | None = None,
+        sil_linking_policy: SILLinkingPolicy | None = None,
+        on_stage: Callable[[str, bool], None] | None = None,
     ) -> DerivationStats:
         """Run all analytical stages and record a terminal derivation status."""
 
         current = params or MeltingParameters()
+        sil_policy = sil_linking_policy or SILLinkingPolicy()
         cutoff = experimental_before or experimental_before_from_environment()
         if cutoff is not None and self.scope_repository is not None:
             self.scope_repository.assign_before(
@@ -98,18 +106,75 @@ class PCRAnalyticsJob:
                 {
                     **current.as_dict(),
                     "experimental_before": cutoff.isoformat() if cutoff else None,
+                    "pcr_sil_linking": sil_policy.as_dict(),
                 }
             ),
             rebuild=rebuild,
         )
 
         try:
-            wells_classified, real_samples = self.pipeline.classify_wells(derivation_id)
-            self.pipeline.classify_runs(derivation_id)
-            interpretations = self.pipeline.interpret(derivation_id, current)
-            target_qc_rows = self.pipeline.evaluate_qc(derivation_id)
-            episodes = self.pipeline.associate_episodes(derivation_id)
-            result_groups = self.pipeline.select_results(derivation_id)
+            wells_classified, real_samples = self._run_stage(
+                on_stage,
+                "Classifying PCR wells",
+                lambda: self.pipeline.classify_wells(
+                    derivation_id,
+                    on_progress=lambda processed, total: on_stage(
+                        f"Classifying PCR wells ({processed}/{total})", False
+                    )
+                    if on_stage is not None
+                    else None,
+                ),
+            )
+            self._run_stage(
+                on_stage,
+                "Validating PCR–Microb matches",
+                lambda: self.repository.validate_microb_samples(derivation_id),
+            )
+            self._run_stage(
+                on_stage,
+                "Classifying PCR runs",
+                lambda: self.pipeline.classify_runs(derivation_id),
+            )
+            interpretations = self._run_stage(
+                on_stage,
+                "Interpreting melting curves",
+                lambda: self.pipeline.interpret(derivation_id, current),
+            )
+            target_qc_rows = self._run_stage(
+                on_stage,
+                "Evaluating PCR QC",
+                lambda: self.pipeline.evaluate_qc(derivation_id),
+            )
+            episodes = self._run_stage(
+                on_stage,
+                "Associating PCR episodes",
+                lambda: self.pipeline.associate_episodes(derivation_id),
+            )
+            result_groups = self._run_stage(
+                on_stage,
+                "Selecting PCR results",
+                lambda: self.pipeline.select_results(derivation_id),
+            )
+            sample_results = self._run_stage(
+                on_stage,
+                "Classifying promoted PCR samples",
+                lambda: self.repository.classify_promoted_sample_results(derivation_id),
+            )
+            sil_links = self._run_stage(
+                on_stage,
+                "Linking PCR results to SIL evidence",
+                lambda: self.repository.link_sil_results(
+                    derivation_id,
+                    policy_version=sil_policy.version,
+                    max_days=sil_policy.previous_sample_max_days,
+                    max_negatives=sil_policy.previous_sample_max_negatives,
+                ),
+            )
+            sil_culture_summaries = self._run_stage(
+                on_stage,
+                "Aggregating direct SIL culture markers",
+                lambda: self.repository.summarize_sil_culture_markers(derivation_id),
+            )
             review_items = self.repository.count_review_items(derivation_id)
             stats = DerivationStats(
                 derivation_id=derivation_id,
@@ -120,6 +185,9 @@ class PCRAnalyticsJob:
                 target_qc_rows=target_qc_rows,
                 episodes=episodes,
                 result_groups=result_groups,
+                sample_results=sample_results,
+                sil_culture_summaries=sil_culture_summaries,
+                sil_links=sil_links,
                 review_items=review_items,
             )
             self.repository.finish_derivation(
@@ -135,6 +203,19 @@ class PCRAnalyticsJob:
                 details_json=_json({"error": str(exc)}),
             )
             raise
+
+    @staticmethod
+    def _run_stage(
+        on_stage: Callable[[str, bool], None] | None,
+        label: str,
+        operation: Callable[[], Any],
+    ) -> Any:
+        if on_stage is not None:
+            on_stage(label, False)
+        result = operation()
+        if on_stage is not None:
+            on_stage(label, True)
+        return result
 
 
 # Compatibility aliases for existing callers of the former module-private rules.

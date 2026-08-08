@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile
 
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 
 from ..schema import raw_excel_rows

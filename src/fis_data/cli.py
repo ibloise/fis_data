@@ -13,23 +13,28 @@ from zipfile import is_zipfile
 
 import click
 from dotenv import load_dotenv
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from .db import DBSettings, get_engine, sqlite_url_for_path
+from .db import get_engine, get_db_settings
 from .etl.contracts import JobContext
 from .etl.control import RunStatus, ensure_source, finish_run, start_run
 from .etl.excel_parse_job import ExcelParseJob
+from .etl.exports import export_downstream, format_names
 from .etl.file_registry import register_file
 from .etl.ingest_excel import ingest_excel_file
 from .etl.ingest_text import ingest_text_file
 from .etl.materialization import MaterializationJob
 from .etl.materialization_registry import get_entity_materializer
-from .etl.microb_parse_job import MicrobParseJob
-from .etl.microb_catalogs import MicrobCatalogRepository
-from .etl.microb_staging_job import MicrobStagingJob
+from .etl.microb.catalogs import MicrobCatalogRepository
+from .etl.microb.normalization import MicrobNormalizer
+from .etl.microb.parse_job import MicrobParseJob
+from .etl.microb.staging_job import MicrobStagingJob
 from .etl.pcr.analytics import PCRAnalyticsJob
+from .etl.pcr.analytics.sil_linking import SILLinkingPolicy
 from .etl.pcr.review.cli import pcr_review
 from .schema import create_schema
+from .schema import stg_microb_technique
 from .web import create_app
 
 
@@ -43,26 +48,20 @@ def cli() -> None:
 cli.add_command(pcr_review)
 
 
-def _engine_for_db_path(db_path: str | None) -> Engine:
-    if db_path is None:
-        return get_engine()
-
-    path = Path(db_path).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return get_engine(DBSettings(url=sqlite_url_for_path(path)))
+def _engine_for_db_url(db_url: str | None) -> Engine:
+    return get_engine(get_db_settings(db_url))
 
 
 @cli.command("serve")
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--port", default=8000, show_default=True, type=int)
-@click.option("--db-path", type=click.Path(dir_okay=False))
-def serve(host: str, port: int, db_path: str | None) -> None:
+@click.option("--db-url", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+def serve(host: str, port: int, db_url: str | None) -> None:
     """Serve the PCR review frontend and read-only API."""
 
     import uvicorn
 
-    database_url = sqlite_url_for_path(db_path) if db_path else None
-    uvicorn.run(create_app(database_url=database_url), host=host, port=port)
+    uvicorn.run(create_app(database_url=db_url), host=host, port=port)
 
 
 def _expand_input_paths(
@@ -184,14 +183,13 @@ def _excel_candidate_error(path: Path) -> str | None:
 
 @cli.command("init-db")
 @click.option(
-    "--db-path",
-    type=click.Path(dir_okay=False),
-    help="SQLite database path.",
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
 )
 def init_db(db_path: str | None) -> None:
-    """Create the SQLite schema."""
+    """Create the PostgreSQL schema."""
 
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
     create_schema(engine)
     click.echo("Database schema initialized.")
 
@@ -205,7 +203,7 @@ def _ingest_file(
     entity_name: str,
     file_format: str,
 ) -> dict[str, object]:
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
     create_schema(engine)
     run_id = start_run(engine, pipeline_name=f"ingest:{file_format}:{entity_name}")
 
@@ -267,9 +265,8 @@ def _ingest_file(
 
 @cli.command("ingest-text")
 @click.option(
-    "--db-path",
-    type=click.Path(dir_okay=False),
-    help="SQLite database path.",
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
 )
 @click.option("--source-name", required=True, help="Logical source name.")
 @click.option("--entity", "entity_name", required=True, help="Logical entity name.")
@@ -316,9 +313,8 @@ def ingest_text(
 
 @cli.command("ingest-excel")
 @click.option(
-    "--db-path",
-    type=click.Path(dir_okay=False),
-    help="SQLite database path.",
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
 )
 @click.option("--source-name", required=True, help="Logical source name.")
 @click.option("--entity", "entity_name", required=True, help="Logical entity name.")
@@ -411,9 +407,8 @@ def ingest_excel(
 
 @cli.command("parse-excel")
 @click.option(
-    "--db-path",
-    type=click.Path(dir_okay=False),
-    help="SQLite database path.",
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
 )
 @click.option("--entity", "entity_name", required=True, help="Excel entity name.")
 @click.option(
@@ -443,7 +438,7 @@ def parse_excel(
 ) -> None:
     """Parse raw Excel rows into payload_json."""
 
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
     create_schema(engine)
     run_id = start_run(engine, pipeline_name=f"parse:excel:{entity_name}")
     job = ExcelParseJob(engine)
@@ -531,9 +526,8 @@ def parse_excel(
 
 @cli.command("materialize")
 @click.option(
-    "--db-path",
-    type=click.Path(dir_okay=False),
-    help="SQLite database path.",
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
 )
 @click.option("--entity", "entity_name", required=True, help="Entity to materialize.")
 @click.option(
@@ -569,7 +563,7 @@ def materialize(
             param_hint="--entity",
         )
 
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
     create_schema(engine)
     run_id = start_run(engine, pipeline_name=f"materialize:{entity_name.casefold()}")
     job = MaterializationJob(engine, materializer)
@@ -656,9 +650,8 @@ def materialize(
 
 @cli.command("derive-pcr")
 @click.option(
-    "--db-path",
-    type=click.Path(dir_okay=False),
-    help="SQLite database path.",
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
 )
 @click.option(
     "--algorithm-version",
@@ -681,26 +674,53 @@ def materialize(
     help="Mark runs before this timestamp EXPERIMENTAL during this derivation. "
     "Defaults to PCR_EXPERIMENTAL_BEFORE when configured.",
 )
+@click.option(
+    "--previous-sample-max-days", type=click.IntRange(min=0), default=90,
+    show_default=True, help="Maximum days for retrospective PCR--SIL evidence.",
+)
+@click.option(
+    "--previous-sample-max-negatives", type=click.IntRange(min=0), default=3,
+    show_default=True, help="Maximum intervening negative cultures in PCR--SIL linking.",
+)
 def derive_pcr(
     db_path: str | None,
     algorithm_version: str,
     rebuild: bool,
     ignore_overrides: bool,
     experimental_before: datetime | None,
+    previous_sample_max_days: int,
+    previous_sample_max_negatives: int,
 ) -> None:
     """Build the versioned PCR analytical and QC model."""
 
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
+    click.echo("Preparing PostgreSQL schema and indexes...", err=True)
     create_schema(engine)
     run_id = start_run(engine, pipeline_name="derive:pcr")
-    click.echo("Deriving PCR analytical model...", err=True)
     try:
-        stats = PCRAnalyticsJob(engine).run(
-            algorithm_version=algorithm_version,
-            rebuild=rebuild,
-            ignore_overrides=ignore_overrides,
-            experimental_before=experimental_before,
-        )
+        with click.progressbar(
+            length=10,
+            label="Deriving PCR: preparing",
+            show_pos=True,
+            show_eta=False,
+            file=sys.stderr,
+        ) as progress:
+            def on_stage(label: str, completed: bool) -> None:
+                progress.label = f"Deriving PCR: {label}"
+                if completed:
+                    progress.update(1)
+
+            stats = PCRAnalyticsJob(engine).run(
+                algorithm_version=algorithm_version,
+                rebuild=rebuild,
+                ignore_overrides=ignore_overrides,
+                experimental_before=experimental_before,
+                sil_linking_policy=SILLinkingPolicy(
+                    previous_sample_max_days=previous_sample_max_days,
+                    previous_sample_max_negatives=previous_sample_max_negatives,
+                ),
+                on_stage=on_stage,
+            )
     except Exception as exc:
         finish_run(
             engine,
@@ -721,14 +741,40 @@ def derive_pcr(
         "PCR derivation complete: "
         f"{stats.interpretations} interpretations, "
         f"{stats.target_qc_rows} target QC rows, "
-        f"{stats.episodes} episodes, {stats.review_items} review items.",
+        f"{stats.episodes} episodes, {stats.sample_results} promoted sample results, "
+        f"{stats.sil_culture_summaries} SIL culture summaries, "
+        f"{stats.review_items} review items.",
         err=True,
     )
     click.echo(json.dumps(details, ensure_ascii=False, indent=2))
 
 
+@cli.command("export-downstream")
+@click.option(
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
+)
+@click.option(
+    "--format", "format_name", type=click.Choice(format_names()),
+    default="analytical-core-tables", show_default=True,
+    help="Registered downstream export frame.",
+)
+@click.option(
+    "--output", "output_path", type=click.Path(dir_okay=False, path_type=Path),
+    required=True, help="Destination XLSX file.",
+)
+def export_downstream_command(
+    db_path: str | None, format_name: str, output_path: Path
+) -> None:
+    """Export one read-only downstream analytical frame to XLSX."""
+
+    engine = _engine_for_db_url(db_path)
+    counts = export_downstream(engine, format_name=format_name, output_path=output_path)
+    click.echo(json.dumps({"format": format_name, "output": str(output_path), "rows": counts}, ensure_ascii=False, indent=2))
+
+
 @cli.command("materialize-microb")
-@click.option("--db-path", type=click.Path(dir_okay=False), help="SQLite database path.")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
 @click.option("--entity", "entity_name", default="microb", show_default=True)
 @click.option("--file-id", type=int, help="Materialize only one parsed Microb file.")
 def materialize_microb(
@@ -736,7 +782,7 @@ def materialize_microb(
 ) -> None:
     """Materialize parsed Microb text payloads into staging tables."""
 
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
     create_schema(engine)
     job = MicrobStagingJob(engine)
     file_ids = [file_id] if file_id is not None else job.repository.parsed_file_ids(
@@ -753,16 +799,27 @@ def materialize_microb(
     run_id = start_run(engine, pipeline_name="materialize:microb")
     results = []
     failed = False
-    for candidate_file_id in file_ids:
-        result = job.run(
-            ctx=JobContext(
-                entity_name=entity_name,
-                file_id=candidate_file_id,
-                run_id=run_id,
+    with click.progressbar(
+        file_ids,
+        label=f"Materializing {entity_name}",
+        show_pos=True,
+        item_show_func=(
+            lambda candidate_file_id: (
+                f"file_id={candidate_file_id}" if candidate_file_id is not None else ""
             )
-        )
-        results.append({"file_id": candidate_file_id, "ok": result.ok, **result.metrics})
-        failed = failed or not result.ok
+        ),
+        file=sys.stderr,
+    ) as progress:
+        for candidate_file_id in progress:
+            result = job.run(
+                ctx=JobContext(
+                    entity_name=entity_name,
+                    file_id=candidate_file_id,
+                    run_id=run_id,
+                )
+            )
+            results.append({"file_id": candidate_file_id, "ok": result.ok, **result.metrics})
+            failed = failed or not result.ok
     finish_run(
         engine,
         run_id=run_id,
@@ -775,7 +832,7 @@ def materialize_microb(
 
 
 @cli.command("load-microb-catalogs")
-@click.option("--db-path", type=click.Path(dir_okay=False), help="SQLite database path.")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
 @click.option(
     "--catalog-dir",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
@@ -785,17 +842,67 @@ def materialize_microb(
 def load_microb_catalogs(db_path: str | None, catalog_dir: Path) -> None:
     """Load versioned Microb reference catalogs for later normalization."""
 
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
     create_schema(engine)
     stats = MicrobCatalogRepository(engine).load_directory(catalog_dir)
     click.echo(json.dumps([asdict(item) for item in stats], ensure_ascii=False, indent=2))
 
 
+@cli.command("normalize-microb")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+@click.option("--file-id", type=int, help="Normalize only one Microb file.")
+@click.option("--rebuild", is_flag=True, help="Delete the normalized Microb layer before loading it again.")
+def normalize_microb(
+    db_path: str | None, file_id: int | None, rebuild: bool
+) -> None:
+    """Normalize Microb staging rows into the relational domain tables."""
+
+    engine = _engine_for_db_url(db_path)
+    create_schema(engine)
+    normalizer = MicrobNormalizer(engine)
+    if rebuild:
+        if file_id is not None:
+            raise click.UsageError("--rebuild cannot be combined with --file-id.")
+        click.echo("Rebuilding normalized Microb tables...", err=True)
+        normalizer.rebuild()
+    if file_id is not None:
+        file_ids = [file_id]
+    else:
+        with engine.connect() as conn:
+            file_ids = list(
+                conn.execute(
+                    select(stg_microb_technique.c.file_id)
+                    .distinct()
+                    .order_by(stg_microb_technique.c.file_id)
+                ).scalars()
+            )
+    totals = {"techniques": 0, "susceptibilities": 0, "issues": 0}
+    if not file_ids:
+        click.echo(json.dumps(totals, indent=2))
+        return
+    total_stages = sum(normalizer.batch_count(file_id=int(value)) for value in file_ids) * 8
+
+    with click.progressbar(
+        length=total_stages,
+        label="Normalizing Microb",
+        show_pos=True,
+        file=sys.stderr,
+    ) as progress:
+        for candidate_file_id in file_ids:
+            def on_stage(stage: str) -> None:
+                progress.label = f"Microb file_id={candidate_file_id}: {stage}"
+                progress.update(1)
+
+            stats = normalizer.normalize(file_id=int(candidate_file_id), on_stage=on_stage)
+            for key in totals:
+                totals[key] += stats[key]
+    click.echo(json.dumps(totals, indent=2))
+
+
 @cli.command("parse-microb")
 @click.option(
-    "--db-path",
-    type=click.Path(dir_okay=False),
-    help="SQLite database path.",
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
 )
 @click.option(
     "--entity",
@@ -825,7 +932,7 @@ def parse_microb(
 ) -> None:
     """Parse pending Microb raw text rows into payload_json."""
 
-    engine = _engine_for_db_path(db_path)
+    engine = _engine_for_db_url(db_path)
     create_schema(engine)
     job = MicrobParseJob(engine)
     file_ids = (

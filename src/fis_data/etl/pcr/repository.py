@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import case, delete, exists, func, select, update
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection
 
 from ...schema import (
@@ -274,8 +274,8 @@ class PCRMaterializationRepository:
                 "source_file_name": "file_name",
             }.items()
         }
-        values["run_started"] = _sqlite_datetime(attributes.get("run_started"))
-        values["run_ended"] = _sqlite_datetime(attributes.get("run_ended"))
+        values["run_started"] = _database_datetime(attributes.get("run_started"))
+        values["run_ended"] = _database_datetime(attributes.get("run_ended"))
         self.conn.execute(
             update(pcr_run).where(pcr_run.c.pcr_run_id == pcr_run_id).values(**values)
         )
@@ -372,6 +372,6 @@ def _parse_cfx_datetime(value: Any) -> datetime | None:
         return None
 
 
-def _sqlite_datetime(value: Any) -> Any:
+def _database_datetime(value: Any) -> Any:
     parsed = _parse_cfx_datetime(value)
-    return func.datetime(parsed.strftime("%Y-%m-%d %H:%M:%S")) if parsed else None
+    return parsed

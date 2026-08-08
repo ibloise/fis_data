@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import create_engine, select
 
-from fis_data.etl.microb_catalogs import MicrobCatalogRepository
+from fis_data.etl.microb.catalogs import MicrobCatalogRepository, _catalog_name
 from fis_data.schema import (
     create_schema,
     ref_microb_catalog,
@@ -52,3 +52,9 @@ def test_microb_catalog_loader_accepts_cp1252_files(tmp_path) -> None:
         assert conn.execute(
             select(ref_microb_catalog_entry.c.description)
         ).scalar_one() == "ESCHERICHIA COLI Ñ"
+
+
+def test_excel_catalogues_keep_a_distinct_fallback_name(tmp_path) -> None:
+    assert _catalog_name(tmp_path / "Procedencias.xls") == "procedencias_extra"
+    assert _catalog_name(tmp_path / "Servicios.xls") == "servicios_extra"
+    assert _catalog_name(tmp_path / "Hospitales.xls") == "hospitales"

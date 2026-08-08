@@ -5,7 +5,7 @@ import json
 from sqlalchemy import create_engine, insert, select
 
 from fis_data.etl.contracts import JobContext
-from fis_data.etl.microb_staging_job import MicrobStagingJob
+from fis_data.etl.microb.staging_job import MicrobStagingJob
 from fis_data.schema import (
     create_schema,
     ctl_etl_run,

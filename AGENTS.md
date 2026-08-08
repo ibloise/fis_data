@@ -11,6 +11,8 @@ These instructions apply to the whole repository.
 - If a task appears to require data access, ask for explicit permission before touching those files.
 - Do not open, query, inspect, dump, sample, or otherwise read the real SQLite database unless the user gives explicit authorization in the current conversation.
 - It is allowed to create and read temporary dummy SQLite databases for tests, as long as they do not contain real project data.
+- Do not scan, enumerate, print, or otherwise inspect environment variables unless the user gives explicit authorization in the current conversation.
+- Do not attempt to connect to any local or remote PostgreSQL or MySQL instance unless the user gives explicit and specific authorization in the current conversation.
 
 ## Existing Code
 

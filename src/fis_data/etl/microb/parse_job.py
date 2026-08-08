@@ -6,10 +6,10 @@ import logging
 
 from sqlalchemy.engine import Engine
 
-from .contracts import JobContext, JobResult
-from .parse.microb_parser import MicrobExportLine, MicrobParser
-from .repos import RawTextLinesRepository
-from .types import ParsedRowUpdate, ParseStats, ParseStatus
+from ..contracts import JobContext, JobResult
+from ..repos import RawTextLinesRepository
+from ..types import ParsedRowUpdate, ParseStats, ParseStatus
+from .parser import MicrobExportLine, MicrobParser
 
 log = logging.getLogger(__name__)
 
