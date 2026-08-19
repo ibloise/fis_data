@@ -681,6 +681,18 @@ pcr_microb_well_validation = Table(
     Column("validated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+pcr_sample_scope_gate = Table(
+    "pcr_sample_scope_gate",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("legacy_screening_run_id", Integer, ForeignKey("pcr_run.pcr_run_id")),
+    Column("reset_screening_run_id", Integer, ForeignKey("pcr_run.pcr_run_id")),
+    Column("gate_status", String(50), nullable=False),
+    Column("reason", Text, nullable=True),
+    Column("details_json", Text, nullable=False),
+)
+
 pcr_run_analysis = Table(
     "pcr_run_analysis",
     metadata,
@@ -1017,6 +1029,7 @@ Index(
     microb_sample_analysis.c.analysis_kind,
 )
 Index("idx_pcr_microb_validation_status", pcr_microb_well_validation.c.derivation_id, pcr_microb_well_validation.c.validation_status)
+Index("idx_pcr_sample_scope_gate_status", pcr_sample_scope_gate.c.derivation_id, pcr_sample_scope_gate.c.gate_status)
 Index("idx_microb_sample_patient_dates", microb_sample.c.patient_id, microb_sample.c.received_at, microb_sample.c.entered_at)
 Index("idx_microb_analysis_pmdr", microb_sample_analysis.c.sample_id, microb_sample_analysis.c.analysis_code, microb_sample_analysis.c.analysis_kind)
 Index("idx_microb_isolate_result_organism", microb_isolate.c.analysis_result_id, microb_isolate.c.microorganism_code)
@@ -1409,8 +1422,12 @@ def create_views(engine: Engine) -> None:
             WITH matched AS (
                 SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                 FROM pcr_microb_well_validation AS validation
+                LEFT JOIN pcr_sample_scope_gate AS gate
+                  ON gate.derivation_id=validation.derivation_id
+                 AND gate.pcr_sample_id=validation.pcr_sample_id
                 WHERE validation.derivation_id=({current})
                   AND validation.validation_status='MATCH_ELIGIBLE'
+                  AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
             ), pcr_flags AS (
                 SELECT selection.pcr_sample_id,
                        MAX(CASE WHEN selection.preferred_interpretation_id IS NULL THEN -1 WHEN interpretation.call='POSITIVE' THEN 1 ELSE 0 END) FILTER (WHERE selection.run_type='SCREENING' AND selection.canonical_target='KPC') AS kpc_screening,
@@ -1470,7 +1487,8 @@ def create_views(engine: Engine) -> None:
                    CASE WHEN resolved.has_prior THEN FALSE WHEN resolved.has_direct THEN TRUE ELSE NULL END AS result_itself,
                    origin.code AS origin_code, service.code AS service_code,
                    service.description AS desc_service, origin.description AS desc_proc,
-                   patient.sex, EXTRACT(YEAR FROM AGE(COALESCE(sample.entered_at, sample.received_at), patient.birth_date))::int AS age,
+                   patient.sex, patient.birth_date,
+                   EXTRACT(YEAR FROM AGE(COALESCE(sample.entered_at, sample.received_at), patient.birth_date))::int AS age,
                    pcr_flags.kpc_screening, pcr_flags.ndm_screening,
                    pcr_flags.vim_screening, pcr_flags.oxa48_screening,
                    CASE WHEN -1 IN (pcr_flags.oxa48_screening, pcr_flags.vim_screening, pcr_flags.kpc_screening, pcr_flags.ndm_screening) THEN 'INVALID'
@@ -1482,6 +1500,27 @@ def create_views(engine: Engine) -> None:
                    vim_metric.delta_cq AS vim_log_delta, ndm_metric.delta_cq AS ndm_log_delta,
                    oxa_metric.delta_cq AS oxa48_log_delta, kpc_metric.delta_cq AS kpc_log_delta,
                    result.pcr_category, result.warning_code,
+                   CASE
+                     WHEN pcr_flags.oxa48_specific IS NULL
+                      AND pcr_flags.vim_specific IS NULL
+                      AND pcr_flags.kpc_specific IS NULL
+                      AND pcr_flags.ndm_specific IS NULL
+                       THEN 'SPECIFIC_NOT_PERFORMED'
+                     WHEN pcr_flags.oxa48_specific IS NOT NULL
+                      AND pcr_flags.vim_specific IS NOT NULL
+                      AND pcr_flags.kpc_specific IS NOT NULL
+                      AND pcr_flags.ndm_specific IS NOT NULL
+                       THEN 'SPECIFIC_COMPLETED'
+                     ELSE 'SPECIFIC_PARTIAL'
+                   END AS specific_status,
+                   CASE
+                     WHEN pcr_flags.oxa48_specific IN (0, 1)
+                      AND pcr_flags.vim_specific IN (0, 1)
+                      AND pcr_flags.kpc_specific IN (0, 1)
+                      AND pcr_flags.ndm_specific IN (0, 1)
+                       THEN 'SPECIFIC_VALID'
+                     ELSE 'SPECIFIC_INVALID'
+                   END AS specific_validation,
                    CASE WHEN -1 IN (pcr_flags.oxa48_specific, pcr_flags.vim_specific, pcr_flags.kpc_specific, pcr_flags.ndm_specific) THEN 'INVALID'
                         ELSE (COALESCE(pcr_flags.oxa48_specific, 0)::text || COALESCE(pcr_flags.vim_specific, 0)::text || COALESCE(pcr_flags.kpc_specific, 0)::text || COALESCE(pcr_flags.ndm_specific, 0)::text) END AS encode_fis,
                    (COALESCE(resolved.oxa_detected, FALSE)::int::text || COALESCE(resolved.vim_detected, FALSE)::int::text || COALESCE(resolved.kpc_detected, FALSE)::int::text || COALESCE(resolved.ndm_detected, FALSE)::int::text) AS resolved_encoded,
@@ -1606,6 +1645,12 @@ def create_views(engine: Engine) -> None:
             SELECT 'RESULT', CAST(pcr_sample_id AS TEXT) || ':' || run_type || ':' || canonical_target,
                    concordance FROM pcr_result_selection
             WHERE needs_review=TRUE AND derivation_id=({current})
+            UNION ALL
+            SELECT 'SAMPLE_SCOPE', CAST(sample.pcr_sample_id AS TEXT), gate.reason
+            FROM pcr_sample_scope_gate AS gate
+            JOIN pcr_sample AS sample ON sample.pcr_sample_id=gate.pcr_sample_id
+            WHERE gate.derivation_id=({current})
+              AND gate.gate_status='LEGACY_SCREENING_BLOCKED'
         """,
     }
     with engine.begin() as conn:

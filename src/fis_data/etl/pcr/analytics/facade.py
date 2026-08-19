@@ -38,6 +38,7 @@ class DerivationStats:
     algorithm_version: str
     wells_classified: int
     real_samples: int
+    legacy_screening_blocks: int
     interpretations: int
     target_qc_rows: int
     episodes: int
@@ -106,6 +107,10 @@ class PCRAnalyticsJob:
                 {
                     **current.as_dict(),
                     "experimental_before": cutoff.isoformat() if cutoff else None,
+                    "legacy_screening_gate": {
+                        "cutoff": cutoff.isoformat(),
+                        "policy": "BLOCK_SPECIFIC_UNTIL_ROUTINE_SCREENING_RESET",
+                    },
                     "pcr_sil_linking": sil_policy.as_dict(),
                 }
             ),
@@ -134,6 +139,13 @@ class PCRAnalyticsJob:
                 on_stage,
                 "Classifying PCR runs",
                 lambda: self.pipeline.classify_runs(derivation_id),
+            )
+            legacy_screening_blocks = self._run_stage(
+                on_stage,
+                "Applying legacy screening gate",
+                lambda: self.repository.apply_legacy_screening_gate(
+                    derivation_id, cutoff=cutoff
+                ),
             )
             interpretations = self._run_stage(
                 on_stage,
@@ -181,6 +193,7 @@ class PCRAnalyticsJob:
                 algorithm_version=algorithm_version,
                 wells_classified=wells_classified,
                 real_samples=real_samples,
+                legacy_screening_blocks=legacy_screening_blocks,
                 interpretations=interpretations,
                 target_qc_rows=target_qc_rows,
                 episodes=episodes,

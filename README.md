@@ -204,11 +204,24 @@ as `-1`, never as a negative (`0`). Any binary PCR encoding containing an
 invalid target is exported as `INVALID` rather than a four-bit negative/positive
 code.
 
+`specific_status` distinguishes `SPECIFIC_NOT_PERFORMED` (no specific target),
+`SPECIFIC_PARTIAL` (one to three targets), and `SPECIFIC_COMPLETED` (all four
+targets present). `specific_validation` is `SPECIFIC_VALID` only when all four
+specific carbapenemase targets (OXA48, VIM, KPC and NDM) have valid promoted
+results; otherwise it is `SPECIFIC_INVALID`.
+
 The default melting parameters use normalized-curve peak prominence `0.15`, a
 minimum temperature of `70`, a raw derivative RFU threshold of `100`, Cq limits
 `5` and `40`, and a `±0.5` temperature window around OXA48 (`79.5`), VIM (`82`),
 NDM (`86`), and KPC (`88`). Screening curves can produce multiple target calls;
 specific assays select one best peak for their canonical target.
+
+Runs before the configured experimental cutoff are excluded. In addition, a
+sample with a pre-cutoff Screening PCR cannot promote later specific PCR
+results until it has a new Screening PCR on or after the cutoff. Specific runs
+between the cutoff and that new Screening run remain excluded. The decision is
+audited in `pcr_sample_scope_gate` and appears in the review queue when the
+sample has no routine Screening reset.
 
 QC is target-specific for panel assays. For Screening assays, controls are
 global: at least one positive-control call must be positive, and every

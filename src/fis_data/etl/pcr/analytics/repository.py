@@ -294,6 +294,94 @@ class PCRAnalyticsRepository:
                 {"derivation_id": derivation_id},
             )
 
+    def apply_legacy_screening_gate(
+        self, derivation_id: int, *, cutoff: datetime
+    ) -> int:
+        """Gate sample-specific runs after a pre-cutoff screening PCR.
+
+        A legacy screening run blocks all later specific PCRs for the sample.
+        The first routine screening run resets that block; only specific runs
+        on or after that reset are eligible again.  Raw legacy evidence stays
+        untouched and the decision is persisted for audit.
+        """
+
+        if self.engine.dialect.name != "postgresql":
+            return 0
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    WITH derived_samples AS (
+                        SELECT DISTINCT classification.pcr_sample_id
+                        FROM pcr_well_classification AS classification
+                        WHERE classification.derivation_id=:derivation_id
+                          AND classification.pcr_sample_id IS NOT NULL
+                    ), screening_runs AS (
+                        SELECT DISTINCT sample.pcr_sample_id, run.pcr_run_id,
+                               run.run_started
+                        FROM derived_samples AS sample
+                        JOIN pcr_sample AS pcr_sample
+                          ON pcr_sample.pcr_sample_id=sample.pcr_sample_id
+                        JOIN pcr_well AS well
+                          ON btrim(well.sample_name)=pcr_sample.sample_key
+                        JOIN pcr_run AS run ON run.pcr_run_id=well.pcr_run_id
+                        JOIN pcr_cq_result AS cq
+                          ON cq.pcr_run_id=run.pcr_run_id
+                        WHERE well.sample_name ~ '^[0-9]+$'
+                          AND run.run_started IS NOT NULL
+                          AND upper(cq.target)='SCREENING'
+                    ), legacy AS (
+                        SELECT DISTINCT ON (pcr_sample_id) pcr_sample_id,
+                               pcr_run_id, run_started
+                        FROM screening_runs
+                        WHERE run_started < :cutoff
+                        ORDER BY pcr_sample_id, run_started DESC, pcr_run_id DESC
+                    ), reset AS (
+                        SELECT DISTINCT ON (screening.pcr_sample_id)
+                               screening.pcr_sample_id, screening.pcr_run_id,
+                               screening.run_started
+                        FROM screening_runs AS screening
+                        JOIN legacy ON legacy.pcr_sample_id=screening.pcr_sample_id
+                        WHERE screening.run_started >= :cutoff
+                        ORDER BY screening.pcr_sample_id, screening.run_started, screening.pcr_run_id
+                    )
+                    INSERT INTO pcr_sample_scope_gate (
+                        derivation_id, pcr_sample_id, legacy_screening_run_id,
+                        reset_screening_run_id, gate_status, reason, details_json
+                    )
+                    SELECT :derivation_id, sample.pcr_sample_id,
+                           legacy.pcr_run_id, reset.pcr_run_id,
+                           CASE WHEN legacy.pcr_run_id IS NULL THEN 'NOT_APPLICABLE'
+                                WHEN reset.pcr_run_id IS NULL THEN 'LEGACY_SCREENING_BLOCKED'
+                                ELSE 'RESET_BY_ROUTINE_SCREENING' END,
+                           CASE WHEN legacy.pcr_run_id IS NULL THEN NULL
+                                WHEN reset.pcr_run_id IS NULL THEN 'Pre-cutoff screening blocks all later specific PCR results.'
+                                ELSE 'Pre-cutoff screening blocks specific PCR results until the routine screening reset.' END,
+                           jsonb_build_object(
+                             'cutoff', :cutoff,
+                             'legacy_screening_started_at', legacy.run_started,
+                             'reset_screening_started_at', reset.run_started
+                           )::text
+                    FROM derived_samples AS sample
+                    LEFT JOIN legacy ON legacy.pcr_sample_id=sample.pcr_sample_id
+                    LEFT JOIN reset ON reset.pcr_sample_id=sample.pcr_sample_id
+                    """
+                ),
+                {"derivation_id": derivation_id, "cutoff": cutoff},
+            )
+            return int(
+                conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) FROM pcr_sample_scope_gate
+                        WHERE derivation_id=:derivation_id
+                          AND gate_status='LEGACY_SCREENING_BLOCKED'
+                        """
+                    ),
+                    {"derivation_id": derivation_id},
+                ).scalar_one()
+            )
+
     def link_sil_results(
         self,
         derivation_id: int,
@@ -322,8 +410,12 @@ class PCRAnalyticsRepository:
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=validation.derivation_id
+                     AND gate.pcr_sample_id=validation.pcr_sample_id
                     WHERE validation.derivation_id=:derivation_id
                       AND validation.validation_status='MATCH_ELIGIBLE'
+                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                       AND validation.pcr_sample_id IS NOT NULL
                       AND validation.microb_sample_id IS NOT NULL
                 ), pmdr AS (
@@ -388,8 +480,12 @@ class PCRAnalyticsRepository:
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=validation.derivation_id
+                     AND gate.pcr_sample_id=validation.pcr_sample_id
                     WHERE validation.derivation_id=:derivation_id
                       AND validation.validation_status='MATCH_ELIGIBLE'
+                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                 ), current_isolates AS (
                     SELECT eligible.pcr_sample_id, eligible.microb_sample_id,
                            classification.culture_category, isolate.isolate_id,
@@ -452,8 +548,12 @@ class PCRAnalyticsRepository:
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=validation.derivation_id
+                     AND gate.pcr_sample_id=validation.pcr_sample_id
                     WHERE validation.derivation_id=:derivation_id
                       AND validation.validation_status='MATCH_ELIGIBLE'
+                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                 ), seeds AS (
                     SELECT eligible.pcr_sample_id, current.sample_id AS current_sample_id,
                            current.patient_id, COALESCE(current.received_at, current.entered_at) AS current_at,
@@ -575,8 +675,12 @@ class PCRAnalyticsRepository:
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=validation.derivation_id
+                     AND gate.pcr_sample_id=validation.pcr_sample_id
                     WHERE validation.derivation_id=:derivation_id
                       AND validation.validation_status='MATCH_ELIGIBLE'
+                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                 )
                 INSERT INTO pcr_sil_link_candidate (
                     derivation_id, pcr_sample_id, current_microb_sample_id,
@@ -790,8 +894,12 @@ class PCRAnalyticsRepository:
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=validation.derivation_id
+                     AND gate.pcr_sample_id=validation.pcr_sample_id
                     WHERE validation.derivation_id=:derivation_id
                       AND validation.validation_status='MATCH_ELIGIBLE'
+                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                 ), organism_markers AS (
                     SELECT eligible.pcr_sample_id, eligible.microb_sample_id,
                            isolate.microorganism_code,
@@ -1129,9 +1237,27 @@ class PCRAnalyticsRepository:
                     JOIN pcr_microb_well_validation AS validation
                       ON validation.derivation_id = classification.derivation_id
                      AND validation.pcr_well_id = classification.pcr_well_id
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                     ON gate.derivation_id=classification.derivation_id
+                     AND gate.pcr_sample_id=classification.pcr_sample_id
+                    JOIN pcr_run_analysis AS analysis
+                      ON analysis.derivation_id=classification.derivation_id
+                     AND analysis.pcr_run_id=well.pcr_run_id
                     WHERE classification.derivation_id = :derivation_id
                       AND classification.well_role = :real_sample
                       AND validation.validation_status = 'MATCH_ELIGIBLE'
+                      AND (
+                        analysis.run_type <> 'SPECIFIC'
+                        OR gate.gate_status IS NULL
+                        OR gate.gate_status='NOT_APPLICABLE'
+                        OR (
+                          gate.gate_status='RESET_BY_ROUTINE_SCREENING'
+                          AND analysis.run_started >= (
+                            SELECT run_started FROM pcr_run
+                            WHERE pcr_run_id=gate.reset_screening_run_id
+                          )
+                        )
+                      )
                     GROUP BY well.pcr_run_id, classification.pcr_sample_id
                     """
                 ),
@@ -1234,11 +1360,26 @@ class PCRAnalyticsRepository:
                       ON qc.derivation_id = interpretation.derivation_id
                      AND qc.pcr_run_id = interpretation.pcr_run_id
                      AND qc.canonical_target = interpretation.canonical_target
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=classification.derivation_id
+                     AND gate.pcr_sample_id=classification.pcr_sample_id
                     LEFT JOIN pcr_run_scope AS scope
                       ON scope.pcr_run_id=interpretation.pcr_run_id
                     WHERE interpretation.derivation_id = :derivation_id
                       AND classification.well_role = :real_sample
                       AND validation.validation_status = 'MATCH_ELIGIBLE'
+                      AND (
+                        analysis.run_type <> 'SPECIFIC'
+                        OR gate.gate_status IS NULL
+                        OR gate.gate_status='NOT_APPLICABLE'
+                        OR (
+                          gate.gate_status='RESET_BY_ROUTINE_SCREENING'
+                          AND analysis.run_started >= (
+                            SELECT run_started FROM pcr_run
+                            WHERE pcr_run_id=gate.reset_screening_run_id
+                          )
+                        )
+                      )
                       AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
                     """
                 ),
@@ -1331,6 +1472,7 @@ def _clear_derived_model(conn: Connection) -> None:
     tables = (
         "pcr_sample_target_metric",
         "pcr_sample_result",
+        "pcr_sample_scope_gate",
         "pcr_sil_culture_marker_summary",
         "pcr_sil_organism_marker_summary",
         "pcr_sil_result_link",

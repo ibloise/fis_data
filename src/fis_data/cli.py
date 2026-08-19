@@ -699,7 +699,7 @@ def derive_pcr(
     run_id = start_run(engine, pipeline_name="derive:pcr")
     try:
         with click.progressbar(
-            length=10,
+            length=11,
             label="Deriving PCR: preparing",
             show_pos=True,
             show_eta=False,
@@ -742,6 +742,7 @@ def derive_pcr(
         f"{stats.interpretations} interpretations, "
         f"{stats.target_qc_rows} target QC rows, "
         f"{stats.episodes} episodes, {stats.sample_results} promoted sample results, "
+        f"{stats.legacy_screening_blocks} legacy screening blocks, "
         f"{stats.sil_culture_summaries} SIL culture summaries, "
         f"{stats.review_items} review items.",
         err=True,
