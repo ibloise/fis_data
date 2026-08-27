@@ -28,8 +28,22 @@ from .models import (
     TargetQCEvidence,
     WellClassification,
 )
+from .sil_linking import IRRELEVANT_MICROORGANISM_PATTERN
 
 RULE_VERSION = "1.0"
+
+
+def _sil_relevant_isolate_predicate(alias: str) -> str:
+    """Return the PostgreSQL predicate that excludes non-SIL-FIS organisms."""
+
+    return f"""
+        NOT EXISTS (
+            SELECT 1
+            FROM ref_microb_catalog_entry AS ignored_organism
+            WHERE ignored_organism.ref_microb_catalog_entry_id={alias}.microorganism_id
+              AND ignored_organism.description ~* :irrelevant_organism_pattern
+        )
+    """
 
 
 def _as_datetime(value: Any) -> datetime | None:
@@ -404,9 +418,12 @@ class PCRAnalyticsRepository:
             "policy_version": policy_version,
             "max_days": max_days,
             "max_negatives": max_negatives,
+            "irrelevant_organism_pattern": IRRELEVANT_MICROORGANISM_PATTERN,
         }
+        relevant_isolate = _sil_relevant_isolate_predicate("isolate")
+        relevant_prior_isolate = _sil_relevant_isolate_predicate("prior_isolate")
         with self.engine.begin() as conn:
-            conn.execute(text("""
+            conn.execute(text(f"""
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
@@ -434,12 +451,21 @@ class PCRAnalyticsRepository:
                                  ON isolate.analysis_result_id=result.analysis_result_id
                                WHERE result.sample_analysis_id=pmdr.sample_analysis_id
                                  AND isolate.microorganism_code IS NOT NULL
+                                 AND {relevant_isolate}
                              ) THEN 'CULTURE_POSITIVE'
+                             WHEN EXISTS (
+                               SELECT 1 FROM microb_analysis_result AS result
+                               JOIN microb_isolate AS isolate
+                                 ON isolate.analysis_result_id=result.analysis_result_id
+                               WHERE result.sample_analysis_id=pmdr.sample_analysis_id
+                                 AND isolate.microorganism_code IS NOT NULL
+                             ) THEN 'CULTURE_NEGATIVE'
                              WHEN NOT EXISTS (
                                SELECT 1 FROM microb_analysis_result AS result
                                JOIN microb_isolate AS isolate
                                  ON isolate.analysis_result_id=result.analysis_result_id
                                WHERE result.sample_analysis_id=pmdr.sample_analysis_id
+                                 AND isolate.microorganism_code IS NOT NULL
                              ) AND EXISTS (
                                SELECT 1 FROM microb_analysis_result AS result
                                WHERE result.sample_analysis_id=pmdr.sample_analysis_id
@@ -471,12 +497,15 @@ class PCRAnalyticsRepository:
                 SELECT :derivation_id, classified.microb_sample_id, classified.sample_analysis_id,
                        classified.culture_category, classified.result_codes,
                        :policy_version,
-                       jsonb_build_object('classification_source', 'PMDR_BACTERIOLOGICAL')
+                       jsonb_build_object(
+                           'classification_source', 'PMDR_BACTERIOLOGICAL',
+                           'irrelevant_organism_pattern', :irrelevant_organism_pattern
+                       )
                 FROM classified
             """), params)
             # Record direct marker evidence and explicitly audit contexts which
             # are not allowed to trigger retrospective inheritance.
-            conn.execute(text("""
+            conn.execute(text(f"""
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
@@ -487,7 +516,7 @@ class PCRAnalyticsRepository:
                       AND validation.validation_status='MATCH_ELIGIBLE'
                       AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                 ), current_isolates AS (
-                    SELECT eligible.pcr_sample_id, eligible.microb_sample_id,
+                    SELECT DISTINCT eligible.pcr_sample_id, eligible.microb_sample_id,
                            classification.culture_category, isolate.isolate_id,
                            isolate.microorganism_code,
                            EXISTS (
@@ -505,6 +534,9 @@ class PCRAnalyticsRepository:
                     LEFT JOIN microb_isolate AS isolate
                       ON isolate.analysis_result_id=result.analysis_result_id
                      AND isolate.microorganism_code IS NOT NULL
+                     AND {relevant_isolate}
+                    WHERE isolate.isolate_id IS NOT NULL
+                       OR classification.culture_category <> 'CULTURE_POSITIVE'
                 )
                 INSERT INTO pcr_sil_link_candidate (
                     derivation_id, pcr_sample_id, current_microb_sample_id,
@@ -544,7 +576,7 @@ class PCRAnalyticsRepository:
             # A positive culture that no longer contains the organism is a
             # barrier; negative cultures are counted, while unprocessed ones
             # remain transparent as required by the clinical policy.
-            conn.execute(text("""
+            conn.execute(text(f"""
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
@@ -568,6 +600,7 @@ class PCRAnalyticsRepository:
                     JOIN microb_isolate AS isolate
                       ON isolate.analysis_result_id=result.analysis_result_id
                      AND isolate.microorganism_code IS NOT NULL
+                     AND {relevant_isolate}
                     WHERE current.patient_id IS NOT NULL
                       AND COALESCE(current.received_at, current.entered_at) IS NOT NULL
                       AND NOT EXISTS (
@@ -587,17 +620,36 @@ class PCRAnalyticsRepository:
                                ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
                              WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
                                AND prior_isolate.microorganism_code IS NOT NULL
+                               AND {relevant_prior_isolate}
                            ) AS is_positive,
                            EXISTS (
                              SELECT 1 FROM microb_analysis_result AS prior_result
                              JOIN microb_isolate AS prior_isolate
                                ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
                              WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
+                               AND prior_isolate.microorganism_code IS NOT NULL
+                               AND {relevant_prior_isolate}
                            ) AS has_isolate,
                            EXISTS (
                              SELECT 1 FROM microb_analysis_result AS prior_result
                              WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
                                AND prior_result.result_code='NEG'
+                           ) OR (
+                             EXISTS (
+                               SELECT 1 FROM microb_analysis_result AS prior_result
+                               JOIN microb_isolate AS prior_isolate
+                                 ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
+                               WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
+                                 AND prior_isolate.microorganism_code IS NOT NULL
+                             )
+                             AND NOT EXISTS (
+                               SELECT 1 FROM microb_analysis_result AS prior_result
+                               JOIN microb_isolate AS prior_isolate
+                                 ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
+                               WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
+                                 AND prior_isolate.microorganism_code IS NOT NULL
+                                 AND {relevant_prior_isolate}
+                             )
                            ) AS is_negative,
                            EXISTS (
                              SELECT 1 FROM microb_analysis_result AS prior_result
@@ -605,6 +657,7 @@ class PCRAnalyticsRepository:
                                ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
                              WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
                                AND prior_isolate.microorganism_code=seeds.microorganism_code
+                               AND {relevant_prior_isolate}
                            ) AS has_same_organism
                     FROM seeds
                     JOIN microb_sample AS previous
@@ -645,6 +698,7 @@ class PCRAnalyticsRepository:
                     JOIN microb_isolate AS isolate
                       ON isolate.analysis_result_id=result.analysis_result_id
                      AND isolate.microorganism_code=timeline.microorganism_code
+                     AND {relevant_isolate}
                     JOIN microb_susceptibility_result AS susceptibility
                       ON susceptibility.isolate_id=isolate.isolate_id
                      AND susceptibility.interpretation_code='P'
@@ -671,7 +725,7 @@ class PCRAnalyticsRepository:
                 JOIN microb_sample AS current_sample ON current_sample.sample_id=evidence.current_sample_id
                 WHERE evidence.position=1
             """), params)
-            conn.execute(text("""
+            conn.execute(text(f"""
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
@@ -704,6 +758,7 @@ class PCRAnalyticsRepository:
                 JOIN microb_isolate AS isolate
                   ON isolate.analysis_result_id=result.analysis_result_id
                  AND isolate.microorganism_code IS NOT NULL
+                 AND {relevant_isolate}
                 WHERE NOT EXISTS (
                     SELECT 1 FROM microb_susceptibility_result AS susceptibility
                     WHERE susceptibility.isolate_id=isolate.isolate_id
@@ -889,8 +944,9 @@ class PCRAnalyticsRepository:
 
         if self.engine.dialect.name != "postgresql":
             return 0
+        relevant_isolate = _sil_relevant_isolate_predicate("isolate")
         with self.engine.begin() as conn:
-            conn.execute(text("""
+            conn.execute(text(f"""
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
@@ -922,6 +978,7 @@ class PCRAnalyticsRepository:
                     JOIN microb_isolate AS isolate
                       ON isolate.analysis_result_id=result.analysis_result_id
                      AND isolate.microorganism_code IS NOT NULL
+                     AND {relevant_isolate}
                     LEFT JOIN microb_susceptibility_result AS susceptibility
                       ON susceptibility.isolate_id=isolate.isolate_id
                      AND susceptibility.interpretation_code='P'
@@ -939,7 +996,10 @@ class PCRAnalyticsRepository:
                        marker_codes, isolate_count,
                        jsonb_build_object('evidence_scope', 'DIRECT_CURRENT_CULTURE')
                 FROM organism_markers
-            """), {"derivation_id": derivation_id})
+            """), {
+                "derivation_id": derivation_id,
+                "irrelevant_organism_pattern": IRRELEVANT_MICROORGANISM_PATTERN,
+            })
             result = conn.execute(text("""
                 WITH culture_markers AS (
                     SELECT pcr_sample_id, microb_sample_id,

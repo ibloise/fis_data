@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import Mock
 from datetime import datetime
 
@@ -26,6 +27,10 @@ from fis_data.etl.pcr.analytics.facade import (
 from fis_data.etl.pcr.analytics.models import QCObservation, ResultCandidate
 from fis_data.etl.pcr.analytics.pipeline import PCRAnalyticsPipeline
 from fis_data.etl.pcr.analytics.repository import PCRAnalyticsRepository
+from fis_data.etl.pcr.analytics.sil_linking import (
+    SILLinkingPolicy,
+    is_sil_relevant_microorganism,
+)
 from fis_data.etl.pcr.melting import (
     MeltingParameters,
     calculate_peaks,
@@ -107,6 +112,69 @@ def test_episode_review_run_id_aggregation_is_postgresql_compatible() -> None:
     assert _episode_run_ids_aggregate("sqlite") == "GROUP_CONCAT(episode_run.pcr_run_id)"
     assert _episode_run_ids_aggregate("postgresql") == (
         "STRING_AGG(episode_run.pcr_run_id::text, ',')"
+    )
+
+
+def test_sil_policy_excludes_only_documented_irrelevant_organisms() -> None:
+    assert not is_sil_relevant_microorganism("Candida albicans")
+    assert not is_sil_relevant_microorganism("ENTEROCOCCUS faecium")
+    assert not is_sil_relevant_microorganism("Stenotrophomonas maltophilia")
+    assert not is_sil_relevant_microorganism("Acinetobacter baumannii")
+    assert is_sil_relevant_microorganism("Escherichia coli")
+    assert is_sil_relevant_microorganism(None)
+    assert SILLinkingPolicy().as_dict()["irrelevant_microorganism_pattern"] == (
+        "Candida|Enterococcus|Stenotrophomonas|Acinetobacter"
+    )
+
+
+def test_sil_queries_apply_the_irrelevant_organism_policy() -> None:
+    class CapturingConnection:
+        def __init__(self) -> None:
+            self.executions = []
+
+        def execute(self, statement, params):
+            self.executions.append((str(statement), params))
+            return SimpleNamespace(rowcount=0)
+
+    class CapturingTransaction:
+        def __init__(self, connection) -> None:
+            self.connection = connection
+
+        def __enter__(self):
+            return self.connection
+
+        def __exit__(self, *_):
+            return False
+
+    class CapturingEngine:
+        dialect = SimpleNamespace(name="postgresql")
+
+        def __init__(self, connection) -> None:
+            self.connection = connection
+
+        def begin(self):
+            return CapturingTransaction(self.connection)
+
+    connection = CapturingConnection()
+    repository = PCRAnalyticsRepository(CapturingEngine(connection))
+    repository.link_sil_results(
+        7, policy_version="test", max_days=90, max_negatives=3
+    )
+    repository.summarize_sil_culture_markers(7)
+
+    assert len(connection.executions) == 7
+    assert all(
+        params["irrelevant_organism_pattern"]
+        == "Candida|Enterococcus|Stenotrophomonas|Acinetobacter"
+        for _, params in connection.executions[:6]
+    )
+    assert "THEN 'CULTURE_NEGATIVE'" in connection.executions[0][0]
+    assert "ignored_organism.description ~* :irrelevant_organism_pattern" in (
+        connection.executions[0][0]
+    )
+    assert "AND NOT has_isolate" in connection.executions[2][0]
+    assert "ignored_organism.description ~* :irrelevant_organism_pattern" in (
+        connection.executions[5][0]
     )
 
 

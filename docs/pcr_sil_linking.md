@@ -25,8 +25,8 @@ Se añadirá una categorización derivada por muestra/análisis PMDR:
 
 | Categoría | Criterio |
 |---|---|
-| `CULTURE_POSITIVE` | Hay al menos un aislado Microb con `microorganism_code` no nulo. |
-| `CULTURE_NEGATIVE` | No hay aislado y el resultado bacteriológico está mapeado como cultivo negativo. |
+| `CULTURE_POSITIVE` | Hay al menos un aislado Microb relevante con `microorganism_code` no nulo. |
+| `CULTURE_NEGATIVE` | No hay aislado relevante y el resultado bacteriológico está mapeado como cultivo negativo, o los únicos aislados son irrelevantes para SIL--FIS. |
 | `CULTURE_NOT_PROCESSED` | No hay aislado y el resultado está mapeado como no procesado. |
 | `CULTURE_UNCLASSIFIED` | No se puede clasificar de forma segura; se audita y no se fuerza una categoría clínica. |
 
@@ -41,6 +41,13 @@ NON_PROCESS_CULTURE_CODES = [".04", ".05", "1", "C06", "NPR", "PEN"]
 La lista efectiva debe ser una configuración versionada de códigos, no una
 regla basada en buscar texto en descripciones. Así se podrán ampliar códigos
 históricos sin cambiar el algoritmo.
+
+Para SIL--FIS se excluyen por nombre catalogado los patrones `Candida`,
+`Enterococcus`, `Stenotrophomonas` y `Acinetobacter`, sin distinguir
+mayúsculas/minúsculas. No se escriben en los candidatos, resúmenes ni tabla por
+microorganismo de SIL--FIS. Si coexisten con aislados relevantes, estos últimos
+son los únicos que se conservan; si son los únicos aislados, el cultivo se
+clasifica como `CULTURE_NEGATIVE` y se comporta como si no hubiera aislamiento.
 
 Una muestra actual `CULTURE_NEGATIVE` o `CULTURE_NOT_PROCESSED` conserva esa
 codificación y no inicia ninguna búsqueda retrospectiva.
