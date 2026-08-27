@@ -32,6 +32,7 @@ from .etl.microb.parse_job import MicrobParseJob
 from .etl.microb.staging_job import MicrobStagingJob
 from .etl.pcr.analytics import PCRAnalyticsJob
 from .etl.pcr.analytics.sil_linking import SILLinkingPolicy
+from .etl.pcr.replacement import PCRFileReplacement, supersede_pcr_files
 from .etl.pcr.review.cli import pcr_review
 from .schema import create_schema
 from .schema import stg_microb_technique
@@ -646,6 +647,67 @@ def materialize(
     click.echo(json.dumps(results, ensure_ascii=False, indent=2))
     if failed:
         raise SystemExit(1)
+
+
+@cli.command("supersede-pcr-files")
+@click.option(
+    "--db-url", "db_path",
+    help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).",
+)
+@click.option(
+    "--old-file-id", type=int, multiple=True, required=True,
+    help="Previously materialized PCR file ID to retire; repeat in input order.",
+)
+@click.option(
+    "--new-file-id", type=int, multiple=True, required=True,
+    help="Replacement PCR file ID already parsed and materialized; repeat in input order.",
+)
+@click.option("--reason", help="Optional audit reason for this file replacement.")
+def supersede_pcr_files_command(
+    db_path: str | None,
+    old_file_id: tuple[int, ...],
+    new_file_id: tuple[int, ...],
+    reason: str | None,
+) -> None:
+    """Replace materialized PCR source files while preserving raw audit rows.
+
+    The replacement files must already have completed ingestion, parsing, and
+    materialization.  This clears the derived PCR model; run derive-pcr with
+    --rebuild after a successful replacement.
+    """
+
+    if len(old_file_id) != len(new_file_id):
+        raise click.UsageError(
+            "Provide exactly one --new-file-id for every --old-file-id."
+        )
+    engine = _engine_for_db_url(db_path)
+    create_schema(engine)
+    replacements = tuple(
+        PCRFileReplacement(superseded_file_id=old, replacement_file_id=new)
+        for old, new in zip(old_file_id, new_file_id, strict=True)
+    )
+    try:
+        completed = supersede_pcr_files(
+            engine, replacements=replacements, reason=reason
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "superseded": [
+                    {
+                        "old_file_id": item.superseded_file_id,
+                        "new_file_id": item.replacement_file_id,
+                    }
+                    for item in completed
+                ],
+                "next_step": "Run derive-pcr --rebuild before using PCR views or exports.",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @cli.command("derive-pcr")
