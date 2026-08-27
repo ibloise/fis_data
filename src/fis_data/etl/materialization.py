@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -11,6 +10,7 @@ from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.engine import Engine
 
 from .contracts import JobContext, JobResult
+from ..json_utils import loads_json
 from ..schema import ctl_materialization_item, raw_excel_rows
 
 log = logging.getLogger(__name__)
@@ -155,7 +155,7 @@ class MaterializationRepository:
                 file_id=int(row[2]),
                 sheet_name=str(row[3]),
                 row_no=int(row[4]),
-                payload=json.loads(str(row[5])),
+                payload=loads_json(row[5]),
             )
             for row in records
         ]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import unicodedata
 from collections.abc import Callable, Iterable
 from datetime import date, datetime
@@ -13,6 +12,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection, Engine
 
+from ...json_utils import loads_json
 from ...schema import (
     microb_analysis_result, microb_determination, microb_entity_lineage,
     microb_isolate, microb_isolate_observation, microb_normalization_issue,
@@ -180,7 +180,7 @@ class MicrobNormalizer:
             field_index = hospital_field_indexes.get(str(name))
             if field_index is None:
                 continue
-            raw_fields = json.loads(str(raw_fields_json))
+            raw_fields = loads_json(raw_fields_json)
             label = _catalog_label(
                 raw_fields[field_index] if len(raw_fields) > field_index else None
             )

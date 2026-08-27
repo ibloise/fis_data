@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ..db import get_engine, get_db_settings
+from ..json_utils import loads_json
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -146,7 +146,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
                 {"sample_number": normalized},
             ).mappings()
             return [
-                {**_row(row), "peaks": json.loads(str(row["peaks_json"]))}
+                {**_row(row), "peaks": loads_json(row["peaks_json"])}
                 for row in rows
             ]
 
@@ -242,8 +242,8 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
             return [
                 {
                     **_row(row),
-                    "warnings": json.loads(row["warnings_json"]),
-                    "details": json.loads(row["details_json"]),
+                    "warnings": loads_json(row["warnings_json"]),
+                    "details": loads_json(row["details_json"]),
                 }
                 for row in rows
             ]

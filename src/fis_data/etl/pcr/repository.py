@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -11,6 +10,7 @@ from sqlalchemy import case, delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection
 
+from ...json_utils import loads_json
 from ...schema import (
     ctl_materialization_item,
     pcr_cq_result,
@@ -255,7 +255,13 @@ class PCRMaterializationRepository:
             )
         ).all()
         attributes = {
-            str(key): json.loads(value) if value is not None else None
+            str(key): (
+                value
+                if self.conn.dialect.name == "postgresql"
+                else loads_json(value)
+            )
+            if value is not None
+            else None
             for key, value in rows
         }
         values = {

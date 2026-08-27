@@ -32,7 +32,10 @@ from fis_data.etl.pcr.melting import (
     canonical_target,
     interpret_curve,
 )
-from fis_data.etl.pcr.review.repository import PCRReviewRepository
+from fis_data.etl.pcr.review.repository import (
+    PCRReviewRepository,
+    _episode_run_ids_aggregate,
+)
 from fis_data.etl.pcr.review.service import PCRReviewService
 from fis_data.etl.pcr.scope_policy import experimental_before_from_environment
 from fis_data.schema import (
@@ -98,6 +101,13 @@ def test_experimental_scope_uses_the_documented_default(monkeypatch) -> None:
     monkeypatch.delenv("PCR_EXPERIMENTAL_BEFORE", raising=False)
 
     assert experimental_before_from_environment() == datetime(2023, 7, 1)
+
+
+def test_episode_review_run_id_aggregation_is_postgresql_compatible() -> None:
+    assert _episode_run_ids_aggregate("sqlite") == "GROUP_CONCAT(episode_run.pcr_run_id)"
+    assert _episode_run_ids_aggregate("postgresql") == (
+        "STRING_AGG(episode_run.pcr_run_id::text, ',')"
+    )
 
 
 def test_successful_derivation_is_atomically_promoted_as_current(tmp_path) -> None:

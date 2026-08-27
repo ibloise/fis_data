@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from ..contracts import JobContext, JobResult
+from ...json_utils import loads_json
 from .repository import MicrobStagingRepository
 
 
@@ -40,7 +41,7 @@ class MicrobStagingJob:
             )
             for row in rows:
                 try:
-                    payload = json.loads(str(row["payload_json"]))
+                    payload = loads_json(row["payload_json"])
                 except json.JSONDecodeError:
                     invalid += 1
                     continue

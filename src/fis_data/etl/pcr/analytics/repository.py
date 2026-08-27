@@ -280,9 +280,9 @@ class PCRAnalyticsRepository:
                                WHEN NOT COALESCE(summary.analysis_ok, FALSE) THEN 'Microb match lacks bacteriological PMDR analysis.'
                                ELSE NULL
                            END,
-                           json_build_object('match_count', COALESCE(summary.match_count, 0),
+                           jsonb_build_object('match_count', COALESCE(summary.match_count, 0),
                                'specimen_068', COALESCE(summary.specimen_ok, FALSE),
-                               'bacteriological_pmdr', COALESCE(summary.analysis_ok, FALSE))::text
+                               'bacteriological_pmdr', COALESCE(summary.analysis_ok, FALSE))
                     FROM pcr_well_classification AS classification
                     LEFT JOIN pcr_sample AS pcr_sample
                       ON pcr_sample.pcr_sample_id = classification.pcr_sample_id
@@ -361,7 +361,7 @@ class PCRAnalyticsRepository:
                              'cutoff', :cutoff,
                              'legacy_screening_started_at', legacy.run_started,
                              'reset_screening_started_at', reset.run_started
-                           )::text
+                           )
                     FROM derived_samples AS sample
                     LEFT JOIN legacy ON legacy.pcr_sample_id=sample.pcr_sample_id
                     LEFT JOIN reset ON reset.pcr_sample_id=sample.pcr_sample_id
@@ -469,9 +469,9 @@ class PCRAnalyticsRepository:
                     culture_category, result_codes_json, policy_version, details_json
                 )
                 SELECT :derivation_id, classified.microb_sample_id, classified.sample_analysis_id,
-                       classified.culture_category, classified.result_codes::text,
+                       classified.culture_category, classified.result_codes,
                        :policy_version,
-                       jsonb_build_object('classification_source', 'PMDR_BACTERIOLOGICAL')::text
+                       jsonb_build_object('classification_source', 'PMDR_BACTERIOLOGICAL')
                 FROM classified
             """), params)
             # Record direct marker evidence and explicitly audit contexts which
@@ -517,7 +517,7 @@ class PCRAnalyticsRepository:
                        current.microb_sample_id, current.isolate_id, susceptibility.antibiotic_code,
                        'DIRECT', 'ACCEPTED', 0, 0, :policy_version,
                        'Positive carbapenemase marker in the current SIL isolate.',
-                       jsonb_build_object('culture_category', current.culture_category)::text
+                       jsonb_build_object('culture_category', current.culture_category)
                 FROM current_isolates AS current
                 JOIN microb_susceptibility_result AS susceptibility
                   ON susceptibility.isolate_id=current.isolate_id
@@ -535,7 +535,7 @@ class PCRAnalyticsRepository:
                          WHEN current.characterized THEN 'Current isolate is already characterized by BLE or carbapenemase.'
                          ELSE 'Current culture cannot safely start retrospective search.'
                        END,
-                       jsonb_build_object('culture_category', current.culture_category)::text
+                       jsonb_build_object('culture_category', current.culture_category)
                 FROM current_isolates AS current
                 WHERE current.culture_category <> 'CULTURE_POSITIVE'
                    OR current.isolate_id IS NULL OR current.characterized
@@ -666,7 +666,7 @@ class PCRAnalyticsRepository:
                        EXTRACT(DAY FROM (COALESCE(current_sample.received_at, current_sample.entered_at) - evidence.previous_at))::integer,
                        evidence.negative_count, :policy_version,
                        'First compatible prior 068/PMDR isolate with a positive carbapenemase marker.',
-                       jsonb_build_object('organism_exact_match', TRUE)::text
+                       jsonb_build_object('organism_exact_match', TRUE)
                 FROM evidence
                 JOIN microb_sample AS current_sample ON current_sample.sample_id=evidence.current_sample_id
                 WHERE evidence.position=1
@@ -693,7 +693,7 @@ class PCRAnalyticsRepository:
                        NULL, NULL, NULL, 'SEARCH', 'NO_EVIDENCE', NULL, NULL,
                        :policy_version,
                        'No compatible prior positive carbapenemase evidence was found.',
-                       jsonb_build_object('culture_category', classification.culture_category)::text
+                       jsonb_build_object('culture_category', classification.culture_category)
                 FROM eligible
                 JOIN pcr_sil_culture_classification AS classification
                   ON classification.derivation_id=:derivation_id
@@ -761,7 +761,7 @@ class PCRAnalyticsRepository:
                        CASE WHEN candidate_id IS NULL THEN 'No compatible carbapenemase evidence in SIL.'
                             WHEN candidate_kind='DIRECT' THEN 'Direct current SIL evidence.'
                             ELSE 'Compatible historical SIL evidence.' END,
-                       jsonb_build_object('pcr_call', call, 'marker_code', marker_code)::text
+                       jsonb_build_object('pcr_call', call, 'marker_code', marker_code)
                 FROM chosen WHERE position=1
             """), params)
             return int(result.rowcount if result.rowcount is not None else 0)
@@ -823,7 +823,7 @@ class PCRAnalyticsRepository:
                          'specific_negative_targets', specific_negative_targets,
                          'screening_negative', COALESCE(screening_negative, FALSE),
                          'screening_positive', COALESCE(screening_positive, FALSE)
-                       )::text
+                       )
                 FROM grouped
             """), {"derivation_id": derivation_id})
             conn.execute(text("""
@@ -870,7 +870,7 @@ class PCRAnalyticsRepository:
                        jsonb_build_object(
                          'formula', 'log10(2^(target_cq-reference_16s_cq))',
                          'reference_found', reference.cq IS NOT NULL
-                       )::text
+                       )
                 FROM promoted_target AS target
                 LEFT JOIN reference_16s AS reference
                   ON reference.pcr_sample_id=target.pcr_sample_id
@@ -936,8 +936,8 @@ class PCRAnalyticsRepository:
                 )
                 SELECT :derivation_id, pcr_sample_id, microb_sample_id, microorganism_code,
                        oxa_detected, kpc_detected, ndm_detected, vim_detected,
-                       marker_codes::text, isolate_count,
-                       jsonb_build_object('evidence_scope', 'DIRECT_CURRENT_CULTURE')::text
+                       marker_codes, isolate_count,
+                       jsonb_build_object('evidence_scope', 'DIRECT_CURRENT_CULTURE')
                 FROM organism_markers
             """), {"derivation_id": derivation_id})
             result = conn.execute(text("""
@@ -964,10 +964,10 @@ class PCRAnalyticsRepository:
                          CASE WHEN kpc_detected THEN 'KPC' END,
                          CASE WHEN ndm_detected THEN 'NDM' END,
                          CASE WHEN vim_detected THEN 'VIM' END
-                       ], NULL))::text,
+                       ], NULL)),
                        organism_count, isolate_count,
                        jsonb_build_object('evidence_scope', 'DIRECT_CURRENT_CULTURE',
-                                          'aggregation', 'BINARY_UNION_ACROSS_ORGANISMS')::text
+                                          'aggregation', 'BINARY_UNION_ACROSS_ORGANISMS')
                 FROM culture_markers
             """), {"derivation_id": derivation_id})
             return int(result.rowcount if result.rowcount is not None else 0)

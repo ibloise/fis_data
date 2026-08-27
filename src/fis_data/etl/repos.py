@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import bindparam, func, insert, select, update
 from sqlalchemy.engine import Engine
 
+from fis_data.json_utils import loads_json
 from fis_data.schema import (
     ctl_excel_parse_file,
     ctl_excel_parse_sheet,
@@ -293,7 +294,7 @@ class RawExcelRowsRepository:
                 row_id=int(row[0]),
                 sheet_name=str(row[1]),
                 row_no=int(row[2]),
-                values=list(json.loads(str(row[3]))),
+                values=list(loads_json(row[3])),
             )
             for row in rows
         ]

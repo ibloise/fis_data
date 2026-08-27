@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
+from ....json_utils import loads_json
 from .models import (
     ActiveOverride,
     NewReviewAction,
@@ -18,6 +19,14 @@ from .models import (
     ReviewItem,
     ReviewItemType,
 )
+
+
+def _episode_run_ids_aggregate(dialect_name: str) -> str:
+    """Return the portable aggregate used by the episode review query."""
+
+    if dialect_name == "postgresql":
+        return "STRING_AGG(episode_run.pcr_run_id::text, ',')"
+    return "GROUP_CONCAT(episode_run.pcr_run_id)"
 
 
 class PCRReviewRepository:
@@ -46,6 +55,9 @@ class PCRReviewRepository:
         """Build the current heterogeneous review queue with stable keys."""
 
         derivation_id = self.current_derivation_id()
+        episode_run_ids_aggregate = _episode_run_ids_aggregate(
+            self.engine.dialect.name
+        )
         items: list[ReviewItem] = []
         with self.engine.connect() as conn:
             well_rows = conn.execute(
@@ -72,10 +84,10 @@ class PCRReviewRepository:
             ).all()
             episode_rows = conn.execute(
                 text(
-                    """
+                    f"""
                     SELECT episode.episode_key, episode.review_reason,
                            episode.association_status,
-                           GROUP_CONCAT(episode_run.pcr_run_id)
+                           {episode_run_ids_aggregate}
                     FROM pcr_episode AS episode
                     JOIN pcr_episode_run AS episode_run
                       ON episode_run.episode_id=episode.episode_id
@@ -139,7 +151,7 @@ class PCRReviewRepository:
                         "run_id": int(row[0]),
                         "run_class": str(row[2]),
                         "episode_date_key": row[3],
-                        "targets": json.loads(str(row[4])),
+                        "targets": loads_json(row[4]),
                     },
                 )
             )
@@ -284,7 +296,7 @@ class PCRReviewRepository:
             "run_name": row[0],
             "run_class": row[1],
             "episode_date_key": row[2],
-            "targets": json.loads(str(row[3])),
+            "targets": loads_json(row[3]),
             "real_sample_count": int(row[4]),
         }
         return ReviewItem(**{**asdict(item), "context": context})
@@ -369,7 +381,7 @@ class PCRReviewRepository:
                     "run_name": row[1],
                     "run_class": row[2],
                     "episode_date_key": row[3],
-                    "targets": json.loads(str(row[4])),
+                    "targets": loads_json(row[4]),
                     "real_sample_count": int(row[5]),
                     "overlap_with_subject": overlap_score,
                     "shares_episode_date": same_date,
@@ -389,7 +401,7 @@ class PCRReviewRepository:
                 "run_name": row[1],
                 "run_class": row[2],
                 "episode_date_key": row[3],
-                "targets": json.loads(str(row[4])),
+                "targets": loads_json(row[4]),
                 "real_sample_count": int(row[5]),
             }
             for row in member_rows
@@ -525,37 +537,48 @@ class PCRReviewRepository:
     def append_action(self, action: NewReviewAction) -> ReviewAction:
         """Append and return one immutable review event."""
 
+        return self.append_actions((action,))[0]
+
+    def append_actions(
+        self, actions: tuple[NewReviewAction, ...]
+    ) -> list[ReviewAction]:
+        """Append a validated group of review events atomically."""
+
+        if not actions:
+            return []
+        action_ids: list[int] = []
         with self.engine.begin() as conn:
-            result = conn.execute(
-                text(
-                    """
-                    INSERT INTO pcr_review_action (
-                        item_type, subject_key, issue_fingerprint,
-                        source_derivation_id, action, resolution, override_kind,
-                        payload_json, reason, reviewer
-                    ) VALUES (
-                        :item_type, :subject_key, :fingerprint,
-                        :derivation_id, :action, :resolution, :override_kind,
-                        :payload, :reason, :reviewer
-                    )
-                    RETURNING review_action_id
-                    """
-                ),
-                {
-                    "item_type": action.item_type,
-                    "subject_key": action.subject_key,
-                    "fingerprint": action.fingerprint,
-                    "derivation_id": action.derivation_id,
-                    "action": action.action,
-                    "resolution": action.resolution,
-                    "override_kind": action.override_kind,
-                    "payload": _json(action.payload) if action.payload else None,
-                    "reason": action.reason,
-                    "reviewer": action.reviewer,
-                },
-            )
-            action_id = int(result.scalar_one())
-        return self.get_action(action_id)
+            for action in actions:
+                result = conn.execute(
+                    text(
+                        """
+                        INSERT INTO pcr_review_action (
+                            item_type, subject_key, issue_fingerprint,
+                            source_derivation_id, action, resolution, override_kind,
+                            payload_json, reason, reviewer
+                        ) VALUES (
+                            :item_type, :subject_key, :fingerprint,
+                            :derivation_id, :action, :resolution, :override_kind,
+                            :payload, :reason, :reviewer
+                        )
+                        RETURNING review_action_id
+                        """
+                    ),
+                    {
+                        "item_type": action.item_type,
+                        "subject_key": action.subject_key,
+                        "fingerprint": action.fingerprint,
+                        "derivation_id": action.derivation_id,
+                        "action": action.action,
+                        "resolution": action.resolution,
+                        "override_kind": action.override_kind,
+                        "payload": _json(action.payload) if action.payload else None,
+                        "reason": action.reason,
+                        "reviewer": action.reviewer,
+                    },
+                )
+                action_ids.append(int(result.scalar_one()))
+        return [self.get_action(action_id) for action_id in action_ids]
 
     def get_action(self, action_id: int) -> ReviewAction:
         """Load one action by identifier."""
@@ -682,7 +705,7 @@ def _action(row: Any) -> ReviewAction:
         action=str(row[5]),
         resolution=str(row[6]) if row[6] is not None else None,
         override_kind=str(row[7]) if row[7] is not None else None,
-        payload=json.loads(str(row[8])) if row[8] else None,
+        payload=loads_json(row[8]) if row[8] else None,
         reason=str(row[9]),
         reviewer=str(row[10]),
         created_at=str(row[11]),
@@ -697,7 +720,7 @@ def _loads_json(value: Any) -> Any:
     if value is None:
         return None
     try:
-        return json.loads(str(value))
+        return loads_json(value)
     except json.JSONDecodeError:
         return value
 

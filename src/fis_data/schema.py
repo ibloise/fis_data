@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from sqlalchemy import (
     Boolean,
     Column,
@@ -20,9 +23,45 @@ from sqlalchemy import (
     inspect,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
+from sqlalchemy.types import TypeDecorator
 
 metadata = MetaData()
+
+MANAGED_VIEW_NAMES = (
+    "v_pcr_algorithmic_result",
+    "v_pcr_effective_result",
+    "v_pcr_result_history",
+    "v_pcr_unpromoted_sample_errors",
+    "v_pcr_sample_result",
+    "v_pcr_sample_target_metric",
+    "v_pcr_sil_organism_marker_summary",
+    "v_pcr_sil_culture_marker_summary",
+    "v_pcr_sil_result_link",
+    "v_downstream_sil_pcr_global",
+    "v_downstream_sil_pcr_organism",
+    "v_pcr_run_qc",
+    "v_pcr_target_qc_evidence",
+    "v_pcr_episodes",
+    "v_pcr_review_queue",
+)
+
+
+class JSONDocument(TypeDecorator[Any]):
+    """Use JSONB in PostgreSQL while retaining legacy JSON text in SQLite."""
+
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        type_ = JSONB() if dialect.name == "postgresql" else Text()
+        return dialect.type_descriptor(type_)
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        if value is None or dialect.name != "postgresql":
+            return value
+        return json.loads(value) if isinstance(value, str) else value
 
 ctl_source = Table(
     "ctl_source",
@@ -58,6 +97,18 @@ ctl_file_registry = Table(
     UniqueConstraint("source_name", "sha256", name="uq_file_registry_source_sha"),
 )
 
+ctl_file_supersession = Table(
+    "ctl_file_supersession",
+    metadata,
+    Column("superseded_file_id", Integer, ForeignKey("ctl_file_registry.file_id"), primary_key=True),
+    Column("replacement_file_id", Integer, ForeignKey("ctl_file_registry.file_id"), nullable=False),
+    Column("reason", Text, nullable=True),
+    Column(
+        "superseded_at", DateTime, nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
 ctl_etl_run = Table(
     "ctl_etl_run",
     metadata,
@@ -71,7 +122,7 @@ ctl_etl_run = Table(
     ),
     Column("finished_at", DateTime, nullable=True),
     Column("status", String(20), nullable=False),
-    Column("details_json", Text, nullable=True),
+    Column("details_json", JSONDocument(), nullable=True),
 )
 
 raw_text_lines = Table(
@@ -93,7 +144,7 @@ raw_text_lines = Table(
         server_default=text("'RAW_ONLY'"),
     ),
     Column("parse_error", Text, nullable=True),
-    Column("payload_json", Text, nullable=True),
+    Column("payload_json", JSONDocument(), nullable=True),
     Column(
         "ingested_at",
         DateTime,
@@ -113,7 +164,7 @@ raw_excel_rows = Table(
     Column("entity_name", String(100), nullable=False),
     Column("sheet_name", String(255), nullable=False),
     Column("row_no", Integer, nullable=False),
-    Column("raw_values_json", Text, nullable=False),
+    Column("raw_values_json", JSONDocument(), nullable=False),
     Column("row_sha256", String(64), nullable=False),
     Column("is_header", Boolean, nullable=False, server_default=text("false")),
     Column(
@@ -123,7 +174,7 @@ raw_excel_rows = Table(
         server_default=text("'RAW_ONLY'"),
     ),
     Column("parse_error", Text, nullable=True),
-    Column("payload_json", Text, nullable=True),
+    Column("payload_json", JSONDocument(), nullable=True),
     Column(
         "ingested_at",
         DateTime,
@@ -234,8 +285,8 @@ ref_microb_catalog_entry = Table(
     ),
     Column("code", String(100), nullable=False),
     Column("description", Text, nullable=True),
-    Column("aliases_json", Text, nullable=False),
-    Column("raw_fields_json", Text, nullable=False),
+    Column("aliases_json", JSONDocument(), nullable=False),
+    Column("raw_fields_json", JSONDocument(), nullable=False),
     UniqueConstraint(
         "ref_microb_catalog_id", "code", name="uq_ref_microb_catalog_entry_code"
     ),
@@ -383,7 +434,7 @@ ctl_excel_parse_file = Table(
     Column("rows_parsed", Integer, nullable=False, server_default=text("0")),
     Column("rows_error", Integer, nullable=False, server_default=text("0")),
     Column("error", Text, nullable=True),
-    Column("details_json", Text, nullable=True),
+    Column("details_json", JSONDocument(), nullable=True),
     Column(
         "started_at",
         DateTime,
@@ -415,7 +466,7 @@ ctl_excel_parse_sheet = Table(
     Column("rows_skipped", Integer, nullable=False, server_default=text("0")),
     Column("rows_error", Integer, nullable=False, server_default=text("0")),
     Column("error", Text, nullable=True),
-    Column("details_json", Text, nullable=True),
+    Column("details_json", JSONDocument(), nullable=True),
     Column(
         "started_at",
         DateTime,
@@ -438,7 +489,7 @@ ctl_materialization_item = Table(
     Column("materializer_version", String(40), nullable=False),
     Column("status", String(20), nullable=False),
     Column("error", Text, nullable=True),
-    Column("target_json", Text, nullable=True),
+    Column("target_json", JSONDocument(), nullable=True),
     Column(
         "created_at",
         DateTime,
@@ -534,7 +585,7 @@ pcr_run_attribute = Table(
     Column("run_id", Integer, ForeignKey("ctl_etl_run.run_id"), nullable=False),
     Column("attribute_key", String(255), nullable=False),
     Column("attribute_key_normalized", String(255), nullable=False),
-    Column("value_json", Text, nullable=True),
+    Column("value_json", JSONDocument(), nullable=True),
     Column("is_canonical", Boolean, nullable=False, server_default=text("false")),
     Column("has_conflict", Boolean, nullable=False, server_default=text("false")),
     UniqueConstraint(
@@ -613,10 +664,10 @@ pcr_derivation_run = Table(
     Column("derivation_id", Integer, primary_key=True, autoincrement=True),
     Column("algorithm_version", String(100), nullable=False),
     Column("rule_version", String(40), nullable=False),
-    Column("parameters_json", Text, nullable=False),
+    Column("parameters_json", JSONDocument(), nullable=False),
     Column("status", String(30), nullable=False),
     Column("is_current", Boolean, nullable=False, server_default=text("false")),
-    Column("details_json", Text, nullable=True),
+    Column("details_json", JSONDocument(), nullable=True),
     Column(
         "started_at",
         DateTime,
@@ -677,7 +728,7 @@ pcr_microb_well_validation = Table(
     Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id")),
     Column("validation_status", String(50), nullable=False),
     Column("validation_reason", Text),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
     Column("validated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
@@ -690,7 +741,7 @@ pcr_sample_scope_gate = Table(
     Column("reset_screening_run_id", Integer, ForeignKey("pcr_run.pcr_run_id")),
     Column("gate_status", String(50), nullable=False),
     Column("reason", Text, nullable=True),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_run_analysis = Table(
@@ -707,7 +758,7 @@ pcr_run_analysis = Table(
     Column("run_type", String(20), nullable=False),
     Column("run_started", DateTime, nullable=True),
     Column("episode_date_key", String(10), nullable=True),
-    Column("canonical_targets_json", Text, nullable=False),
+    Column("canonical_targets_json", JSONDocument(), nullable=False),
     Column("review_reason", Text, nullable=True),
 )
 
@@ -735,8 +786,8 @@ pcr_interpretation = Table(
     Column("cq", Float, nullable=True),
     Column("peak_temperature", Float, nullable=True),
     Column("peak_deriv_rfu", Float, nullable=True),
-    Column("peaks_json", Text, nullable=False),
-    Column("metrics_json", Text, nullable=True),
+    Column("peaks_json", JSONDocument(), nullable=False),
+    Column("metrics_json", JSONDocument(), nullable=True),
     Column("error", Text, nullable=True),
     UniqueConstraint(
         "derivation_id",
@@ -761,8 +812,8 @@ pcr_target_qc = Table(
     Column("is_valid", Boolean, nullable=False),
     Column("positive_controls", Integer, nullable=False),
     Column("negative_controls", Integer, nullable=False),
-    Column("warnings_json", Text, nullable=False),
-    Column("details_json", Text, nullable=False),
+    Column("warnings_json", JSONDocument(), nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_target_qc_evidence = Table(
@@ -868,7 +919,7 @@ pcr_result_selection = Table(
     Column("relation_kind", String(40), nullable=False),
     Column("concordance", String(30), nullable=False),
     Column("needs_review", Boolean, nullable=False),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_sil_culture_classification = Table(
@@ -878,9 +929,9 @@ pcr_sil_culture_classification = Table(
     Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), primary_key=True),
     Column("sample_analysis_id", Integer, ForeignKey("microb_sample_analysis.sample_analysis_id"), nullable=False),
     Column("culture_category", String(32), nullable=False),
-    Column("result_codes_json", Text, nullable=False),
+    Column("result_codes_json", JSONDocument(), nullable=False),
     Column("policy_version", String(64), nullable=False),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_sil_link_candidate = Table(
@@ -901,7 +952,7 @@ pcr_sil_link_candidate = Table(
     Column("negative_count", Integer),
     Column("policy_version", String(64), nullable=False),
     Column("reason", Text, nullable=False),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_sil_result_link = Table(
@@ -916,7 +967,7 @@ pcr_sil_result_link = Table(
     Column("concordance", String(32), nullable=False),
     Column("policy_version", String(64), nullable=False),
     Column("reason", Text, nullable=False),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_sil_organism_marker_summary = Table(
@@ -930,9 +981,9 @@ pcr_sil_organism_marker_summary = Table(
     Column("kpc_detected", Boolean, nullable=False),
     Column("ndm_detected", Boolean, nullable=False),
     Column("vim_detected", Boolean, nullable=False),
-    Column("marker_codes_json", Text, nullable=False),
+    Column("marker_codes_json", JSONDocument(), nullable=False),
     Column("isolate_count", Integer, nullable=False),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_sil_culture_marker_summary = Table(
@@ -945,10 +996,10 @@ pcr_sil_culture_marker_summary = Table(
     Column("kpc_detected", Boolean, nullable=False),
     Column("ndm_detected", Boolean, nullable=False),
     Column("vim_detected", Boolean, nullable=False),
-    Column("marker_codes_json", Text, nullable=False),
+    Column("marker_codes_json", JSONDocument(), nullable=False),
     Column("organism_count", Integer, nullable=False),
     Column("isolate_count", Integer, nullable=False),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_sample_result = Table(
@@ -959,7 +1010,7 @@ pcr_sample_result = Table(
     Column("pcr_category", String(32), nullable=False),
     Column("decision_source", String(20), nullable=False),
     Column("warning_code", String(80)),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_sample_target_metric = Table(
@@ -973,7 +1024,7 @@ pcr_sample_target_metric = Table(
     Column("target_cq", Float),
     Column("reference_16s_cq", Float),
     Column("delta_cq", Float),
-    Column("details_json", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
 )
 
 pcr_review_action = Table(
@@ -987,7 +1038,7 @@ pcr_review_action = Table(
     Column("action", String(30), nullable=False),
     Column("resolution", String(30), nullable=True),
     Column("override_kind", String(30), nullable=True),
-    Column("payload_json", Text, nullable=True),
+    Column("payload_json", JSONDocument(), nullable=True),
     Column("reason", Text, nullable=False),
     Column("reviewer", String(100), nullable=False),
     Column(
@@ -1116,6 +1167,7 @@ def create_schema(engine: Engine) -> None:
     """Create all ETL tables if they do not already exist."""
 
     metadata.create_all(engine)
+    _upgrade_json_documents(engine)
     _upgrade_pcr_run_metadata(engine)
     _normalize_pcr_run_datetimes(engine)
     _upgrade_pcr_run_type(engine)
@@ -1128,6 +1180,45 @@ def create_schema(engine: Engine) -> None:
         for index in table.indexes:
             index.create(engine, checkfirst=True)
     create_views(engine)
+
+
+def _upgrade_json_documents(engine: Engine) -> None:
+    """Promote legacy PostgreSQL JSON text columns to native JSONB."""
+
+    if engine.dialect.name != "postgresql":
+        return
+    inspector = inspect(engine)
+    alterations = []
+    for table in metadata.tables.values():
+        existing = {
+            str(column["name"]): str(column["type"]).upper()
+            for column in inspector.get_columns(table.name)
+        }
+        alterations.extend(
+            (table.name, column.name)
+            for column in table.columns
+            if isinstance(column.type, JSONDocument)
+            and existing.get(column.name) != "JSONB"
+        )
+    if not alterations:
+        return
+    with engine.begin() as conn:
+        _drop_managed_views(conn)
+        for table_name, column_name in alterations:
+            conn.execute(
+                text(
+                    f"ALTER TABLE {table_name} ALTER COLUMN {column_name} "
+                    f"TYPE JSONB USING {column_name}::jsonb"
+                )
+            )
+
+
+def _drop_managed_views(conn) -> None:
+    """Drop public views in dependency order before a table-type migration."""
+
+    conn.execute(text("DROP VIEW IF EXISTS v_pcr_current_result"))
+    for name in reversed(MANAGED_VIEW_NAMES):
+        conn.execute(text(f"DROP VIEW IF EXISTS {name}"))
 
 
 def _upgrade_pcr_run_metadata(engine: Engine) -> None:
@@ -1364,6 +1455,115 @@ def create_views(engine: Engine) -> None:
               ON scope.pcr_run_id=interpretation.pcr_run_id
             WHERE interpretation.derivation_id=({current})
               AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
+        """,
+        "v_pcr_unpromoted_sample_errors": f"""
+            WITH control_evidence AS (
+                SELECT evidence.derivation_id, evidence.pcr_run_id,
+                       evidence.canonical_target,
+                       jsonb_agg(
+                           jsonb_build_object(
+                               'role', evidence.well_role,
+                               'well', well.well,
+                               'sample_name', well.sample_name,
+                               'content', well.content,
+                               'call', interpretation.call,
+                               'cq', interpretation.cq,
+                               'peak_temperature', interpretation.peak_temperature,
+                               'peak_deriv_rfu', interpretation.peak_deriv_rfu,
+                               'melt_status', COALESCE(
+                                   interpretation.metrics_json::jsonb ->> 'melt_status',
+                                   CASE WHEN interpretation.error IS NULL
+                                        THEN 'MELTING_COMPATIBLE'
+                                        ELSE interpretation.error END
+                               ),
+                               'error', interpretation.error
+                           )
+                           ORDER BY evidence.well_role, well.well,
+                                    interpretation.interpretation_id
+                       ) AS control_evidence_json
+                FROM pcr_target_qc_evidence AS evidence
+                JOIN pcr_interpretation AS interpretation
+                  ON interpretation.interpretation_id=evidence.interpretation_id
+                JOIN pcr_well AS well
+                  ON well.pcr_well_id=interpretation.pcr_well_id
+                WHERE evidence.derivation_id=({current})
+                GROUP BY evidence.derivation_id, evidence.pcr_run_id,
+                         evidence.canonical_target
+            ), failed AS (
+                SELECT interpretation.derivation_id,
+                       classification.pcr_sample_id,
+                       sample.sample_key,
+                       LOWER(analysis.run_type) AS semantic_type,
+                       interpretation.canonical_target,
+                       interpretation.pcr_run_id,
+                       run.run_name,
+                       analysis.run_class,
+                       analysis.run_started,
+                       BOOL_OR(
+                           interpretation.call NOT IN ('POSITIVE', 'NEGATIVE')
+                           OR COALESCE(qc.is_valid, FALSE)=FALSE
+                           OR interpretation.error IS NOT NULL
+                       ) AS is_failed,
+                       STRING_AGG(DISTINCT NULLIF(interpretation.error, ''), ' | ')
+                           AS interpretation_errors,
+                       jsonb_agg(DISTINCT qc.details_json)
+                           FILTER (WHERE qc.details_json IS NOT NULL)
+                           AS target_qc_errors,
+                       MAX(analysis.review_reason) AS run_error
+                FROM pcr_interpretation AS interpretation
+                JOIN pcr_well_classification AS classification
+                  ON classification.derivation_id=interpretation.derivation_id
+                 AND classification.pcr_well_id=interpretation.pcr_well_id
+                 AND classification.well_role='REAL_SAMPLE'
+                JOIN pcr_sample AS sample
+                  ON sample.pcr_sample_id=classification.pcr_sample_id
+                JOIN pcr_run_analysis AS analysis
+                  ON analysis.derivation_id=interpretation.derivation_id
+                 AND analysis.pcr_run_id=interpretation.pcr_run_id
+                JOIN pcr_run AS run
+                  ON run.pcr_run_id=interpretation.pcr_run_id
+                LEFT JOIN pcr_target_qc AS qc
+                  ON qc.derivation_id=interpretation.derivation_id
+                 AND qc.pcr_run_id=interpretation.pcr_run_id
+                 AND qc.canonical_target=interpretation.canonical_target
+                LEFT JOIN pcr_run_scope AS scope
+                  ON scope.pcr_run_id=interpretation.pcr_run_id
+                WHERE interpretation.derivation_id=({current})
+                  AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
+                GROUP BY interpretation.derivation_id, classification.pcr_sample_id,
+                         sample.sample_key, analysis.run_type,
+                         interpretation.canonical_target, interpretation.pcr_run_id,
+                         run.run_name, analysis.run_class, analysis.run_started
+            )
+            SELECT failed.sample_key, failed.pcr_sample_id,
+                   failed.semantic_type, failed.canonical_target,
+                   failed.pcr_run_id, failed.run_name, failed.run_class,
+                   failed.run_started, failed.interpretation_errors,
+                   failed.target_qc_errors, failed.run_error,
+                   controls.control_evidence_json,
+                   COALESCE(
+                       NULLIF(
+                           CONCAT_WS(' | ', failed.interpretation_errors,
+                                     failed.target_qc_errors::text, failed.run_error),
+                           ''
+                       ),
+                       'No valid promotable result'
+                   ) AS error
+            FROM failed
+            LEFT JOIN control_evidence AS controls
+              ON controls.derivation_id=failed.derivation_id
+             AND controls.pcr_run_id=failed.pcr_run_id
+             AND controls.canonical_target=failed.canonical_target
+            WHERE failed.is_failed=TRUE
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pcr_result_selection AS selection
+                  WHERE selection.derivation_id=failed.derivation_id
+                    AND selection.pcr_sample_id=failed.pcr_sample_id
+                    AND LOWER(selection.run_type)=failed.semantic_type
+                    AND selection.canonical_target=failed.canonical_target
+                    AND selection.preferred_interpretation_id IS NOT NULL
+              )
         """,
         "v_pcr_sample_result": f"""
             SELECT sample.sample_key, result.pcr_category, result.decision_source,
@@ -1639,7 +1839,7 @@ def create_views(engine: Engine) -> None:
             WHERE association_status='REVIEW' AND derivation_id=({current})
             UNION ALL
             SELECT 'TARGET_QC', CAST(pcr_run_id AS TEXT) || ':' || canonical_target,
-                   details_json FROM pcr_target_qc
+                   details_json::text FROM pcr_target_qc
             WHERE qc_status='INVALID' AND derivation_id=({current})
             UNION ALL
             SELECT 'RESULT', CAST(pcr_sample_id AS TEXT) || ':' || run_type || ':' || canonical_target,
