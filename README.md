@@ -199,6 +199,28 @@ evidence when the policy permits it. Direct current-culture profiles remain as
 Additional downstream layouts can be added without changing this command or
 the shared workbook writer.
 
+Use the QC-incidence layout to investigate invalid or partially invalid runs:
+
+```bash
+fis-data export-downstream --format pcr-qc-errors \
+  --output pcr_qc_errors.xlsx
+```
+
+It contains the affected runs, their invalid targets and control evidence, and
+only sample--target rows that could not be promoted in that same context. Each
+affected row also reports the result selected in the opposite context
+(`screening` or `specific`), or whether it was not performed or not promotable.
+`Affected raw results` preserves the unpromoted interpretation's Cq, melting
+peak, peak RFU, peaks and full melting metrics. For unpromoted Specific targets
+it also includes the raw same-run 16S reference and `raw_delta_cq`; this is
+marked as raw evidence and its reference QC status is exported alongside it.
+`Promoted after QC failure` traces the same-context promotions that made a
+sample--target disappear from the affected list, including the source and
+promoted runs and both results.
+The `QC targets` sheet marks each invalid target as `ALL_PROMOTED`, `PARTIAL`,
+`NONE_PROMOTED`, or `NO_REAL_SAMPLES`, with its sample counts in
+`promotion_coverage_json`.
+
 In the two downstream crossing sheets, an invalid promoted target is exported
 as `-1`, never as a negative (`0`). Any binary PCR encoding containing an
 invalid target is exported as `INVALID` rather than a four-bit negative/positive
@@ -228,8 +250,16 @@ global: at least one positive-control call must be positive, and every
 negative-control call must be negative.
 
 Current analytical results are exposed through `v_pcr_algorithmic_result`,
-`v_pcr_result_history`, `v_pcr_run_qc`, `v_pcr_episodes`, and
-`v_pcr_review_queue`.
+`v_pcr_result_history`, `v_pcr_run_qc`, `v_pcr_episodes`,
+`v_pcr_review_queue`, and `v_pcr_unpromoted_sample_errors`.
+
+`v_pcr_unpromoted_sample_errors` exposes failed sample results by semantic type
+(`screening`/`specific`) and target, including the source run and error details.
+Rows are omitted when a valid result was promoted for the same sample, type, and
+target, including valid repeats and partial compensation runs.
+Its `control_evidence_json` field preserves the associated QC control calls and
+their Cq, melting peak temperature/RFU, melting status, and interpretation error
+when that evidence exists.
 
 The complete data dictionary for the 17 physical `pcr_*` tables and the public
 `v_pcr_*` views is available in

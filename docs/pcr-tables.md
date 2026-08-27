@@ -712,6 +712,41 @@ Tiene las mismas columnas de resultado que `v_pcr_algorithmic_result` y añade
 `OVERRIDE`/`REVOKE`; si el último es `OVERRIDE`, sustituye `call` por
 `payload_json.call`. No oculta el resto de la evidencia analítica.
 
+### `v_pcr_unpromoted_sample_errors`
+
+Expone los resultados de muestra que no pueden promoverse, junto con el run y
+los errores de interpretación, QC y clasificación disponibles. Cuando el QC
+tiene evidencia de controles, `control_evidence_json` contiene una entrada por
+control con su pozo, llamada, Cq, temperatura y RFU del pico, estado de melting
+(`melt_status`) y error de interpretación. Esto permite identificar, por
+ejemplo, el pico observado en un control afectado por
+`MELTING_INCOMPATIBLE` sin reconstruir manualmente la evidencia.
+`target_qc_errors` se publica como un array `JSONB` con los detalles QC que
+impidieron promover el resultado, no como texto JSON concatenado.
+
+### Exportación `pcr-qc-errors`
+
+El formato `fis-data export-downstream --format pcr-qc-errors` genera seis
+hojas: resumen de runs con QC `INVALID` o `PARTIALLY_INVALID`, detalle de las
+dianas QC inválidas, evidencia de sus controles, muestra--diana afectada y sus
+interpretaciones raw. La hoja de muestra--diana parte de
+`v_pcr_unpromoted_sample_errors`, por lo que excluye una muestra--diana cuando
+otro run del mismo tipo ya pudo promocionarla. Además indica el contexto opuesto
+y su estado (`PROMOTED`, `NOT_PROMOTABLE` o `NOT_PERFORMED`) junto con el
+resultado efectivo cuando existe. Las interpretaciones raw conservan Cq, pico,
+RFU, picos y métricas de melting aunque el resultado no sea promocionable.
+`Promoted after QC failure` traza cada muestra--diana de un run QC erróneo que
+sí se promocionó en otro run del mismo contexto, identificando ambos runs y
+los resultados de origen y promocionado.
+En `QC targets`, `promotion_coverage_status` resume la cobertura para cada
+diana inválida: `ALL_PROMOTED`, `PARTIAL`, `NONE_PROMOTED` o
+`NO_REAL_SAMPLES`. `promotion_coverage_json` incluye los recuentos de muestras
+reales, promocionadas y no promocionadas para esa diana y contexto.
+En Specific, `raw_delta_cq` se calcula con el Cq raw de 16S de la misma muestra
+y run con la fórmula `log10(2^(target_cq-reference_16s_cq))`. Es evidencia raw,
+no una métrica promocionada: se exporta también el estado QC de la referencia y
+`raw_delta_cq_status` indica si falta Cq/16S o su QC no es válido.
+
 ### `v_pcr_result_history`
 
 Lista todas las interpretaciones de muestras clasificadas, no solo la
