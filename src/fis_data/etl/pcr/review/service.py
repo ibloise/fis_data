@@ -12,6 +12,7 @@ from .models import (
     ActiveOverride,
     NewReviewAction,
     OverrideKind,
+    QCOverrideRequest,
     ReviewAction,
     ReviewActionType,
     ReviewItem,
@@ -291,6 +292,61 @@ class PCRReviewService:
             reason,
             reviewer,
         )
+
+    def override_qc_batch(
+        self, requests: tuple[QCOverrideRequest, ...]
+    ) -> list[ReviewAction]:
+        """Validate and atomically persist a reviewed batch of target-QC overrides."""
+
+        if not requests:
+            raise ValueError("Provide at least one target-QC review.")
+        current_items = {
+            item.subject_key: item
+            for item in self.repository.list_current_items()
+            if item.item_type == ReviewItemType.target_qc
+        }
+        seen_subjects: set[str] = set()
+        actions: list[NewReviewAction] = []
+        for request in requests:
+            if request.subject_key in seen_subjects:
+                raise ValueError(
+                    f"Duplicate target-QC review for {request.subject_key}."
+                )
+            seen_subjects.add(request.subject_key)
+            item = current_items.get(request.subject_key)
+            if item is None:
+                raise ValueError(
+                    "Review item does not exist in the current derivation: "
+                    f"{request.subject_key}."
+                )
+            if item.fingerprint != request.fingerprint:
+                raise ValueError(
+                    "Review item is stale; reload it before acting: "
+                    f"{request.subject_key}."
+                )
+            if item.derivation_id != request.derivation_id:
+                raise ValueError(
+                    "Review derivation is stale; reload before acting: "
+                    f"{request.subject_key}."
+                )
+            status_value = _enum_value(QCStatuses, request.status)
+            if request.valid and status_value == QCStatuses.invalid:
+                raise ValueError("INVALID QC cannot be marked valid.")
+            actions.append(
+                NewReviewAction(
+                    item_type=item.item_type,
+                    subject_key=item.subject_key,
+                    fingerprint=item.fingerprint,
+                    derivation_id=item.derivation_id,
+                    action=ReviewActionType.override,
+                    resolution=ReviewResolution.corrected,
+                    override_kind=OverrideKind.qc,
+                    payload={"status": status_value, "valid": request.valid},
+                    reason=_required(request.reason, "reason"),
+                    reviewer=_required(request.reviewer, "reviewer"),
+                )
+            )
+        return self.repository.append_actions(tuple(actions))
 
     def override_result(
         self,

@@ -11,6 +11,7 @@ from fis_data.cli import cli
 from fis_data.etl.pcr.analytics.models import SourceRun
 from fis_data.etl.pcr.analytics.pipeline import PCRAnalyticsPipeline
 from fis_data.etl.pcr.analytics.repository import PCRAnalyticsRepository
+from fis_data.etl.pcr.review.cli import override_qc_batch
 from fis_data.etl.pcr.review.models import ActiveOverride
 from fis_data.etl.pcr.review.repository import PCRReviewRepository
 from fis_data.etl.pcr.review.service import PCRReviewService
@@ -396,6 +397,89 @@ def test_review_cli_lists_json_and_requires_reviewer(tmp_path) -> None:
     )
     assert unresolved.exit_code != 0
     assert "--reviewer" in unresolved.output
+
+
+def test_review_cli_creates_target_qc_overrides_from_a_json_batch(tmp_path) -> None:
+    engine, _ = _review_engine(tmp_path)
+    runner = CliRunner()
+    service = PCRReviewService(PCRReviewRepository(engine))
+    qc_item = next(
+        item
+        for item in service.list_items(item_type="TARGET_QC", limit=10)
+        if item.subject_key == "run:1:target:KPC"
+    )
+    review_file = tmp_path / "qc-reviews.json"
+    review_file.write_text(
+        json.dumps(
+            [
+                {
+                    "item_type": "TARGET_QC",
+                    "subject_key": qc_item.subject_key,
+                    "derivation_id": qc_item.derivation_id,
+                    "fingerprint": qc_item.fingerprint,
+                    "reason": qc_item.reason,
+                    "review": {
+                        "run_id": 1,
+                        "target": "KPC",
+                        "status": "VALID",
+                        "valid": True,
+                        "reason": "Control accepted after review",
+                        "reviewer": "tester",
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        override_qc_batch,
+        [str(review_file)],
+        obj={"service": service},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["created"] == 1
+    assert payload["actions"][0]["payload"] == {"status": "VALID", "valid": True}
+    assert len(service.active_overrides()) == 1
+
+
+def test_review_cli_rejects_an_invalid_qc_batch_before_writing(tmp_path) -> None:
+    engine, _ = _review_engine(tmp_path)
+    review_file = tmp_path / "invalid-qc-reviews.json"
+    review_file.write_text(
+        json.dumps(
+            [
+                {
+                    "item_type": "TARGET_QC",
+                    "subject_key": "run:1:target:KPC",
+                    "derivation_id": 1,
+                    "fingerprint": "stale",
+                    "review": {
+                        "run_id": 1,
+                        "target": "NDM",
+                        "status": "VALID",
+                        "valid": True,
+                        "reason": "Wrong target",
+                        "reviewer": "tester",
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        override_qc_batch,
+        [str(review_file)],
+        obj={"service": PCRReviewService(PCRReviewRepository(engine))},
+    )
+
+    assert result.exit_code != 0
+    assert "does not match review.run_id and review.target" in result.output
+    assert PCRReviewService(PCRReviewRepository(engine)).active_overrides() == []
 
 
 def test_review_cli_show_explains_episode_actions(tmp_path) -> None:

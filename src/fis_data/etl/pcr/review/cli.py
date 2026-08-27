@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import click
@@ -12,6 +13,7 @@ from ....db import get_engine, get_db_settings
 from ....schema import create_schema
 from ...control import RunStatus, finish_run, start_run
 from ..analytics import PCRAnalyticsJob
+from .models import QCOverrideRequest, ReviewItemType
 from .repository import PCRReviewRepository
 from .service import PCRReviewService
 
@@ -218,6 +220,27 @@ def override_qc(obj: dict[str, Any], **kwargs: Any) -> None:
     _json_output(asdict(_call(obj["service"].override_qc, **kwargs)))
 
 
+@override_group.command("qc-batch")
+@click.argument(
+    "review_file",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+)
+@click.pass_obj
+def override_qc_batch(obj: dict[str, Any], review_file: Path) -> None:
+    """Create target-QC overrides from a reviewed JSON list atomically."""
+
+    requests = _load_qc_override_requests(review_file)
+    actions = _call(obj["service"].override_qc_batch, requests=requests)
+    _json_output(
+        {
+            "ok": True,
+            "input_file": str(review_file),
+            "created": len(actions),
+            "actions": [asdict(action) for action in actions],
+        }
+    )
+
+
 @override_group.command("result")
 @_override_options
 @click.option("--preferred-result-id", type=int)
@@ -269,6 +292,73 @@ def _call(function, **kwargs: Any):
         return function(**kwargs)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _load_qc_override_requests(review_file: Path) -> tuple[QCOverrideRequest, ...]:
+    """Parse the reviewed JSON contract accepted by ``override qc-batch``."""
+
+    try:
+        payload = json.loads(review_file.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise click.ClickException(f"Cannot read {review_file}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"{review_file} is not valid JSON: {exc.msg} (line {exc.lineno})."
+        ) from exc
+    if not isinstance(payload, list) or not payload:
+        raise click.ClickException("The review JSON must be a non-empty list.")
+    return tuple(
+        _qc_override_request(entry, position=index)
+        for index, entry in enumerate(payload, start=1)
+    )
+
+
+def _qc_override_request(entry: Any, *, position: int) -> QCOverrideRequest:
+    """Validate one external QC review row before any write is performed."""
+
+    prefix = f"Review entry {position}"
+    if not isinstance(entry, dict):
+        raise click.ClickException(f"{prefix} must be an object.")
+    if entry.get("item_type") != ReviewItemType.target_qc:
+        raise click.ClickException(f"{prefix}.item_type must be TARGET_QC.")
+    subject_key = _json_string(entry, "subject_key", prefix)
+    fingerprint = _json_string(entry, "fingerprint", prefix)
+    derivation_id = _json_integer(entry, "derivation_id", prefix)
+    review = entry.get("review")
+    if not isinstance(review, dict):
+        raise click.ClickException(f"{prefix}.review must be an object.")
+    run_id = _json_integer(review, "run_id", f"{prefix}.review")
+    target = _json_string(review, "target", f"{prefix}.review")
+    if subject_key != f"run:{run_id}:target:{target}":
+        raise click.ClickException(
+            f"{prefix}.subject_key does not match review.run_id and review.target."
+        )
+    valid = review.get("valid")
+    if not isinstance(valid, bool):
+        raise click.ClickException(f"{prefix}.review.valid must be true or false.")
+    return QCOverrideRequest(
+        subject_key=subject_key,
+        fingerprint=fingerprint,
+        derivation_id=derivation_id,
+        status=_json_string(review, "status", f"{prefix}.review"),
+        valid=valid,
+        reason=_json_string(review, "reason", f"{prefix}.review"),
+        reviewer=_json_string(review, "reviewer", f"{prefix}.review"),
+    )
+
+
+def _json_string(value: dict[str, Any], key: str, prefix: str) -> str:
+    result = value.get(key)
+    if not isinstance(result, str) or not result.strip():
+        raise click.ClickException(f"{prefix}.{key} must be a non-empty string.")
+    return result
+
+
+def _json_integer(value: dict[str, Any], key: str, prefix: str) -> int:
+    result = value.get(key)
+    if not isinstance(result, int) or isinstance(result, bool):
+        raise click.ClickException(f"{prefix}.{key} must be an integer.")
+    return result
 
 
 def _json_output(value: Any) -> None:

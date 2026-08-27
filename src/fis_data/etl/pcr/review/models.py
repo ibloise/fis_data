@@ -84,6 +84,19 @@ class NewReviewAction:
 
 
 @dataclass(frozen=True)
+class QCOverrideRequest:
+    """One reviewed target-QC decision submitted for batch application."""
+
+    subject_key: str
+    fingerprint: str
+    derivation_id: int
+    status: str
+    valid: bool
+    reason: str
+    reviewer: str
+
+
+@dataclass(frozen=True)
 class ActiveOverride:
     """Latest non-revoked override for one analytical subject."""
 

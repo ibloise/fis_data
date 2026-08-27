@@ -364,6 +364,44 @@ Estados admitidos: `VALID`, `WARNING`, `INVALID`, `PARTIALLY_INVALID` y
 puede marcarse válido. La selección de resultados de la nueva derivación
 utiliza esta validez efectiva.
 
+### QC de target por lote desde JSON
+
+Para aplicar revisiones ya documentadas en una lista JSON, usa `qc-batch`:
+
+```bash
+fis-data pcr-review override qc-batch revisiones-qc.json
+```
+
+Cada elemento debe ser de tipo `TARGET_QC` y conservar el `subject_key`,
+`derivation_id` y `fingerprint` de la cola actual. La decisión manual se toma
+de `review`; el campo `reason` de primer nivel es contexto diagnóstico del
+fichero y no se registra como motivo de la override.
+
+```json
+[
+  {
+    "item_type": "TARGET_QC",
+    "subject_key": "run:1399:target:KPC",
+    "derivation_id": 1,
+    "fingerprint": "<fingerprint de pcr-review list>",
+    "reason": "Motivo QC original",
+    "review": {
+      "run_id": 1399,
+      "target": "KPC",
+      "status": "VALID",
+      "valid": true,
+      "reason": "Control positivo revisado manualmente",
+      "reviewer": "Iván"
+    }
+  }
+]
+```
+
+Se valida toda la lista antes de escribir y se crean las overrides en una sola
+transacción: si una entrada es inválida, obsoleta o duplicada, no se registra
+ninguna. El comando devuelve las acciones creadas; después ejecuta
+`pcr-review apply --rebuild` para que tengan efecto en la promoción.
+
 ### Resultado final
 
 Elige una interpretación fuente y/o fuerza la llamada expuesta al consumidor:
