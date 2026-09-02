@@ -182,7 +182,8 @@ screening is also retained as negative but carries the warning
 Downstream layouts are registered as independent export frames. The initial
 `analytical-core-tables` frame provides two downstream-ready crossing sheets:
 `SIL PCR global` (one row per sample number) and `SIL PCR organisms` (one row
-per microorganism), together with supporting core tables. The `Report` sheet
+per relevant microorganism, or one row with empty organism fields when the SIL
+culture is negative or not processed), together with supporting core tables. The `Report` sheet
 records export time, derivation identity, and the versioned melting and
 PCR--SIL linking policies:
 

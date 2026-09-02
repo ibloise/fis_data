@@ -29,6 +29,10 @@ from sqlalchemy.types import TypeDecorator
 
 metadata = MetaData()
 
+SIL_IRRELEVANT_MICROORGANISM_PATTERN = (
+    "Candida|Enterococcus|Stenotrophomonas|Acinetobacter"
+)
+
 MANAGED_VIEW_NAMES = (
     "v_pcr_algorithmic_result",
     "v_pcr_effective_result",
@@ -37,6 +41,7 @@ MANAGED_VIEW_NAMES = (
     "v_pcr_sample_result",
     "v_pcr_sample_target_metric",
     "v_pcr_sil_organism_marker_summary",
+    "v_pcr_sil_isolate_marker_summary",
     "v_pcr_sil_culture_marker_summary",
     "v_pcr_sil_result_link",
     "v_downstream_sil_pcr_global",
@@ -934,6 +939,22 @@ pcr_sil_culture_classification = Table(
     Column("details_json", JSONDocument(), nullable=False),
 )
 
+pcr_sil_retrospective_evidence = Table(
+    "pcr_sil_retrospective_evidence",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("current_microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), nullable=False),
+    Column("evidence_microb_sample_id", Integer, ForeignKey("microb_sample.sample_id")),
+    Column("matched_microorganism_code", String(32)),
+    Column("evidence_status", String(32), nullable=False),
+    Column("days_difference", Integer),
+    Column("negative_count", Integer),
+    Column("policy_version", String(64), nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
+)
+
 pcr_sil_link_candidate = Table(
     "pcr_sil_link_candidate",
     metadata,
@@ -983,6 +1004,23 @@ pcr_sil_organism_marker_summary = Table(
     Column("vim_detected", Boolean, nullable=False),
     Column("marker_codes_json", JSONDocument(), nullable=False),
     Column("isolate_count", Integer, nullable=False),
+    Column("details_json", JSONDocument(), nullable=False),
+)
+
+pcr_sil_isolate_marker_summary = Table(
+    "pcr_sil_isolate_marker_summary",
+    metadata,
+    Column("derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), primary_key=True),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), primary_key=True),
+    Column("isolate_id", Integer, ForeignKey("microb_isolate.isolate_id"), primary_key=True),
+    Column("microorganism_code", String(32), nullable=False),
+    Column("isolate_number", String(16), nullable=False),
+    Column("oxa_detected", Boolean, nullable=False),
+    Column("kpc_detected", Boolean, nullable=False),
+    Column("ndm_detected", Boolean, nullable=False),
+    Column("vim_detected", Boolean, nullable=False),
+    Column("marker_codes_json", JSONDocument(), nullable=False),
     Column("details_json", JSONDocument(), nullable=False),
 )
 
@@ -1087,6 +1125,8 @@ Index("idx_microb_isolate_result_organism", microb_isolate.c.analysis_result_id,
 Index("idx_microb_susceptibility_marker", microb_susceptibility_result.c.isolate_id, microb_susceptibility_result.c.antibiotic_code, microb_susceptibility_result.c.interpretation_code)
 Index("idx_pcr_sil_classification_derivation", pcr_sil_culture_classification.c.derivation_id, pcr_sil_culture_classification.c.culture_category)
 Index("idx_pcr_sil_candidate_sample", pcr_sil_link_candidate.c.derivation_id, pcr_sil_link_candidate.c.pcr_sample_id, pcr_sil_link_candidate.c.marker_code)
+Index("idx_pcr_sil_retrospective_sample", pcr_sil_retrospective_evidence.c.derivation_id, pcr_sil_retrospective_evidence.c.evidence_status)
+Index("idx_pcr_sil_isolate_marker", pcr_sil_isolate_marker_summary.c.derivation_id, pcr_sil_isolate_marker_summary.c.microorganism_code)
 Index("idx_pcr_sil_organism_marker", pcr_sil_organism_marker_summary.c.derivation_id, pcr_sil_organism_marker_summary.c.microorganism_code)
 Index("idx_pcr_sil_culture_marker", pcr_sil_culture_marker_summary.c.derivation_id, pcr_sil_culture_marker_summary.c.microb_sample_id)
 Index("idx_pcr_sample_result_category", pcr_sample_result.c.derivation_id, pcr_sample_result.c.pcr_category)
@@ -1589,6 +1629,15 @@ def create_views(engine: Engine) -> None:
             JOIN pcr_sample AS sample ON sample.pcr_sample_id=summary.pcr_sample_id
             WHERE summary.derivation_id=({current})
         """,
+        "v_pcr_sil_isolate_marker_summary": f"""
+            SELECT sample.sample_key, summary.isolate_id, summary.isolate_number,
+                   summary.microorganism_code, summary.oxa_detected,
+                   summary.kpc_detected, summary.ndm_detected, summary.vim_detected,
+                   summary.marker_codes_json
+            FROM pcr_sil_isolate_marker_summary AS summary
+            JOIN pcr_sample AS sample ON sample.pcr_sample_id=summary.pcr_sample_id
+            WHERE summary.derivation_id=({current})
+        """,
         "v_pcr_sil_culture_marker_summary": f"""
             SELECT sample.sample_key, summary.oxa_detected, summary.kpc_detected,
                    summary.ndm_detected, summary.vim_detected,
@@ -1605,8 +1654,11 @@ def create_views(engine: Engine) -> None:
                    candidate.candidate_kind, candidate.candidate_status,
                    candidate.microorganism_code, candidate.marker_code,
                    candidate.days_difference, candidate.negative_count,
-                   evidence.sample_number AS result_sample,
-                   COALESCE(evidence.received_at, evidence.entered_at) AS result_entry_date,
+                   retrospective.evidence_status,
+                   retrospective.matched_microorganism_code,
+                   COALESCE(evidence.sample_number, candidate_evidence.sample_number) AS result_sample,
+                   COALESCE(evidence.received_at, evidence.entered_at,
+                            candidate_evidence.received_at, candidate_evidence.entered_at) AS result_entry_date,
                    CASE WHEN link.link_type='DIRECT' THEN TRUE
                         WHEN link.link_type='PRIOR_COMPATIBLE' THEN FALSE
                         ELSE NULL END AS result_itself
@@ -1614,8 +1666,13 @@ def create_views(engine: Engine) -> None:
             JOIN pcr_sample AS sample ON sample.pcr_sample_id=link.pcr_sample_id
             LEFT JOIN pcr_sil_link_candidate AS candidate
               ON candidate.candidate_id=link.candidate_id
+            LEFT JOIN pcr_sil_retrospective_evidence AS retrospective
+              ON retrospective.derivation_id=link.derivation_id
+             AND retrospective.pcr_sample_id=link.pcr_sample_id
             LEFT JOIN microb_sample AS evidence
-              ON evidence.sample_id=candidate.evidence_microb_sample_id
+              ON evidence.sample_id=retrospective.evidence_microb_sample_id
+            LEFT JOIN microb_sample AS candidate_evidence
+              ON candidate_evidence.sample_id=candidate.evidence_microb_sample_id
             WHERE link.derivation_id=({current})
         """,
         "v_downstream_sil_pcr_global": f"""
@@ -1650,31 +1707,63 @@ def create_views(engine: Engine) -> None:
                 FROM pcr_sample_target_metric AS metric
                 LEFT JOIN pcr_run AS run ON run.pcr_run_id=metric.pcr_run_id
                 WHERE metric.derivation_id=({current})
-            ), candidate_rows AS (
-                SELECT candidate.pcr_sample_id, candidate.current_microb_sample_id,
-                       candidate.microorganism_code, candidate.candidate_kind,
-                       candidate.marker_code, evidence.sample_number,
-                       COALESCE(evidence.received_at, evidence.entered_at) AS evidence_at,
-                       ROW_NUMBER() OVER (
-                         PARTITION BY candidate.pcr_sample_id
-                         ORDER BY COALESCE(evidence.received_at, evidence.entered_at) DESC NULLS LAST,
-                                  candidate.candidate_id DESC
-                       ) AS position
-                FROM pcr_sil_link_candidate AS candidate
-                JOIN microb_sample AS evidence ON evidence.sample_id=candidate.evidence_microb_sample_id
-                WHERE candidate.derivation_id=({current})
-                  AND candidate.candidate_status='ACCEPTED'
+            ), retrospective_markers AS (
+                SELECT retrospective.pcr_sample_id,
+                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='OXA'), FALSE) AS oxa_detected,
+                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='KPC'), FALSE) AS kpc_detected,
+                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='NDM'), FALSE) AS ndm_detected,
+                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='VIM'), FALSE) AS vim_detected,
+                       evidence.sample_number AS result_sample,
+                       COALESCE(evidence.received_at, evidence.entered_at) AS result_entry_date
+                FROM pcr_sil_retrospective_evidence AS retrospective
+                JOIN microb_sample AS evidence
+                  ON evidence.sample_id=retrospective.evidence_microb_sample_id
+                JOIN microb_sample_analysis AS analysis
+                  ON analysis.sample_id=evidence.sample_id
+                 AND analysis.analysis_code='PMDR'
+                 AND analysis.analysis_kind='BACTERIOLOGICAL'
+                JOIN microb_analysis_result AS analysis_result
+                  ON analysis_result.sample_analysis_id=analysis.sample_analysis_id
+                JOIN microb_isolate AS isolate
+                  ON isolate.analysis_result_id=analysis_result.analysis_result_id
+                 AND isolate.microorganism_code IS NOT NULL
+                JOIN microb_susceptibility_result AS susceptibility
+                  ON susceptibility.isolate_id=isolate.isolate_id
+                 AND susceptibility.interpretation_code='P'
+                 AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
+                WHERE retrospective.derivation_id=({current})
+                  AND retrospective.evidence_status='ACCEPTED'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM ref_microb_catalog_entry AS ignored_organism
+                    WHERE ignored_organism.ref_microb_catalog_entry_id=isolate.microorganism_id
+                      AND ignored_organism.description ~* '{SIL_IRRELEVANT_MICROORGANISM_PATTERN}'
+                  )
+                GROUP BY retrospective.pcr_sample_id, evidence.sample_number,
+                         evidence.received_at, evidence.entered_at
             ), resolved AS (
-                SELECT pcr_sample_id,
-                       COALESCE(BOOL_OR(marker_code='OXA'), FALSE) AS oxa_detected,
-                       COALESCE(BOOL_OR(marker_code='KPC'), FALSE) AS kpc_detected,
-                       COALESCE(BOOL_OR(marker_code='NDM'), FALSE) AS ndm_detected,
-                       COALESCE(BOOL_OR(marker_code='VIM'), FALSE) AS vim_detected,
-                       BOOL_OR(candidate_kind='PRIOR') AS has_prior,
-                       BOOL_OR(candidate_kind='DIRECT') AS has_direct,
-                       MAX(sample_number) FILTER (WHERE position=1) AS result_sample,
-                       MAX(evidence_at) FILTER (WHERE position=1) AS result_entry_date
-                FROM candidate_rows GROUP BY pcr_sample_id
+                SELECT matched.pcr_sample_id,
+                       CASE WHEN retrospective.pcr_sample_id IS NOT NULL THEN retrospective.oxa_detected
+                            ELSE COALESCE(culture.oxa_detected, FALSE) END AS oxa_detected,
+                       CASE WHEN retrospective.pcr_sample_id IS NOT NULL THEN retrospective.kpc_detected
+                            ELSE COALESCE(culture.kpc_detected, FALSE) END AS kpc_detected,
+                       CASE WHEN retrospective.pcr_sample_id IS NOT NULL THEN retrospective.ndm_detected
+                            ELSE COALESCE(culture.ndm_detected, FALSE) END AS ndm_detected,
+                       CASE WHEN retrospective.pcr_sample_id IS NOT NULL THEN retrospective.vim_detected
+                            ELSE COALESCE(culture.vim_detected, FALSE) END AS vim_detected,
+                       retrospective.pcr_sample_id IS NOT NULL AS has_prior,
+                       retrospective.pcr_sample_id IS NULL
+                         AND culture.pcr_sample_id IS NOT NULL AS has_direct,
+                       COALESCE(retrospective.result_sample, current_sample.sample_number) AS result_sample,
+                       COALESCE(retrospective.result_entry_date,
+                                current_sample.received_at, current_sample.entered_at) AS result_entry_date
+                FROM matched
+                JOIN microb_sample AS current_sample ON current_sample.sample_id=matched.microb_sample_id
+                LEFT JOIN pcr_sil_culture_marker_summary AS culture
+                  ON culture.derivation_id=({current})
+                 AND culture.pcr_sample_id=matched.pcr_sample_id
+                 AND culture.microb_sample_id=matched.microb_sample_id
+                LEFT JOIN retrospective_markers AS retrospective
+                  ON retrospective.pcr_sample_id=matched.pcr_sample_id
             )
             SELECT patient.nhc, sample.sample_number AS sample, sample.entered_at AS entry_date,
                    classification.culture_category AS result_interpretate,
@@ -1767,13 +1856,13 @@ def create_views(engine: Engine) -> None:
                    COALESCE(resolved_organism.ndm_detected, FALSE)::int AS organism_ndm,
                    (COALESCE(resolved_organism.oxa_detected, FALSE)::int::text || COALESCE(resolved_organism.vim_detected, FALSE)::int::text || COALESCE(resolved_organism.kpc_detected, FALSE)::int::text || COALESCE(resolved_organism.ndm_detected, FALSE)::int::text) AS encoded_carba_org,
                    organism.isolate_count,
-                   organism.oxa_detected::int AS direct_organism_oxa48,
-                   organism.vim_detected::int AS direct_organism_vim,
-                   organism.kpc_detected::int AS direct_organism_kpc,
-                   organism.ndm_detected::int AS direct_organism_ndm
+                   COALESCE(organism.oxa_detected, FALSE)::int AS direct_organism_oxa48,
+                   COALESCE(organism.vim_detected, FALSE)::int AS direct_organism_vim,
+                   COALESCE(organism.kpc_detected, FALSE)::int AS direct_organism_kpc,
+                   COALESCE(organism.ndm_detected, FALSE)::int AS direct_organism_ndm
             FROM v_downstream_sil_pcr_global AS summary_global
             JOIN pcr_sample AS pcr_sample ON pcr_sample.sample_key=summary_global.sample
-            JOIN pcr_sil_organism_marker_summary AS organism
+            LEFT JOIN pcr_sil_organism_marker_summary AS organism
               ON organism.derivation_id=({current}) AND organism.pcr_sample_id=pcr_sample.pcr_sample_id
             LEFT JOIN resolved_organism
               ON resolved_organism.pcr_sample_id=organism.pcr_sample_id
@@ -1789,7 +1878,6 @@ def create_views(engine: Engine) -> None:
                 ORDER BY catalog.is_current DESC, entry.ref_microb_catalog_entry_id DESC
                 LIMIT 1
             ) AS microorganism ON TRUE
-            WHERE organism.derivation_id=({current})
         """,
         "v_pcr_run_qc": f"""
             SELECT run_qc.*, run.run_name FROM pcr_run_qc AS run_qc

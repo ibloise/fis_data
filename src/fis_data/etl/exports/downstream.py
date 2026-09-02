@@ -64,6 +64,11 @@ ANALYTICAL_CORE_TABLES: Final = ExportFormat(
             "ORDER BY sample_key, microorganism_code",
         ),
         ExportSheet(
+            "Culture isolates support",
+            "SELECT * FROM v_pcr_sil_isolate_marker_summary "
+            "ORDER BY sample_key, isolate_number, isolate_id",
+        ),
+        ExportSheet(
             "PCR SIL links",
             "SELECT * FROM v_pcr_sil_result_link "
             "ORDER BY sample_key, run_type, canonical_target",

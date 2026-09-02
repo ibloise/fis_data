@@ -404,11 +404,13 @@ class PCRAnalyticsRepository:
         max_days: int,
         max_negatives: int,
     ) -> int:
-        """Persist direct and retrospective SIL evidence for eligible PCR samples.
+        """Resolve one culture-level SIL profile for each eligible PCR sample.
 
-        The query is intentionally seeded by validated PCR--Microb matches.  The
-        historical CTE only visits the relevant patients and their 068/PMDR
-        timeline; it never walks the whole SIL result set from Python.
+        Direct evidence is the binary union of the current culture's relevant
+        isolates.  When an uncharacterized current isolate starts a historical
+        search, the first compatible prior sample found for *any* current
+        organism becomes the sole retrospective evidence sample.  Its binary
+        profile replaces the current direct profile for that resolution.
         """
 
         if self.engine.dialect.name != "postgresql":
@@ -421,6 +423,7 @@ class PCRAnalyticsRepository:
             "irrelevant_organism_pattern": IRRELEVANT_MICROORGANISM_PATTERN,
         }
         relevant_isolate = _sil_relevant_isolate_predicate("isolate")
+        relevant_current_isolate = _sil_relevant_isolate_predicate("current_isolate")
         relevant_prior_isolate = _sil_relevant_isolate_predicate("prior_isolate")
         with self.engine.begin() as conn:
             conn.execute(text(f"""
@@ -503,8 +506,9 @@ class PCRAnalyticsRepository:
                        )
                 FROM classified
             """), params)
-            # Record direct marker evidence and explicitly audit contexts which
-            # are not allowed to trigger retrospective inheritance.
+            # Select one prior sample for the whole current culture.  The
+            # current organisms are iterated as a set, but the nearest prior
+            # sample containing any of them stops the search for all of them.
             conn.execute(text(f"""
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
@@ -515,79 +519,8 @@ class PCRAnalyticsRepository:
                     WHERE validation.derivation_id=:derivation_id
                       AND validation.validation_status='MATCH_ELIGIBLE'
                       AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
-                ), current_isolates AS (
-                    SELECT DISTINCT eligible.pcr_sample_id, eligible.microb_sample_id,
-                           classification.culture_category, isolate.isolate_id,
-                           isolate.microorganism_code,
-                           EXISTS (
-                             SELECT 1 FROM microb_susceptibility_result AS susceptibility
-                             WHERE susceptibility.isolate_id=isolate.isolate_id
-                               AND susceptibility.interpretation_code='P'
-                               AND susceptibility.antibiotic_code IN ('BLE', 'OXA', 'KPC', 'NDM', 'VIM')
-                           ) AS characterized
-                    FROM eligible
-                    JOIN pcr_sil_culture_classification AS classification
-                      ON classification.derivation_id=:derivation_id
-                     AND classification.microb_sample_id=eligible.microb_sample_id
-                    LEFT JOIN microb_analysis_result AS result
-                      ON result.sample_analysis_id=classification.sample_analysis_id
-                    LEFT JOIN microb_isolate AS isolate
-                      ON isolate.analysis_result_id=result.analysis_result_id
-                     AND isolate.microorganism_code IS NOT NULL
-                     AND {relevant_isolate}
-                    WHERE isolate.isolate_id IS NOT NULL
-                       OR classification.culture_category <> 'CULTURE_POSITIVE'
-                )
-                INSERT INTO pcr_sil_link_candidate (
-                    derivation_id, pcr_sample_id, current_microb_sample_id,
-                    current_isolate_id, microorganism_code, evidence_microb_sample_id,
-                    evidence_isolate_id, marker_code, candidate_kind, candidate_status,
-                    days_difference, negative_count, policy_version, reason, details_json
-                )
-                SELECT :derivation_id, current.pcr_sample_id, current.microb_sample_id,
-                       current.isolate_id, current.microorganism_code,
-                       current.microb_sample_id, current.isolate_id, susceptibility.antibiotic_code,
-                       'DIRECT', 'ACCEPTED', 0, 0, :policy_version,
-                       'Positive carbapenemase marker in the current SIL isolate.',
-                       jsonb_build_object('culture_category', current.culture_category)
-                FROM current_isolates AS current
-                JOIN microb_susceptibility_result AS susceptibility
-                  ON susceptibility.isolate_id=current.isolate_id
-                 AND susceptibility.interpretation_code='P'
-                 AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
-                UNION ALL
-                SELECT :derivation_id, current.pcr_sample_id, current.microb_sample_id,
-                       current.isolate_id, current.microorganism_code,
-                       NULL, NULL, NULL, 'SEARCH', 'NOT_APPLICABLE', NULL, NULL,
-                       :policy_version,
-                       CASE
-                         WHEN current.culture_category IN ('CULTURE_NEGATIVE', 'CULTURE_NOT_PROCESSED')
-                           THEN 'Current culture category does not start retrospective search.'
-                         WHEN current.isolate_id IS NULL THEN 'Current culture has no microorganism-coded isolate.'
-                         WHEN current.characterized THEN 'Current isolate is already characterized by BLE or carbapenemase.'
-                         ELSE 'Current culture cannot safely start retrospective search.'
-                       END,
-                       jsonb_build_object('culture_category', current.culture_category)
-                FROM current_isolates AS current
-                WHERE current.culture_category <> 'CULTURE_POSITIVE'
-                   OR current.isolate_id IS NULL OR current.characterized
-            """), params)
-            # Walk each eligible patient's relevant timeline backwards in SQL.
-            # A positive culture that no longer contains the organism is a
-            # barrier; negative cultures are counted, while unprocessed ones
-            # remain transparent as required by the clinical policy.
-            conn.execute(text(f"""
-                WITH eligible AS (
-                    SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
-                    FROM pcr_microb_well_validation AS validation
-                    LEFT JOIN pcr_sample_scope_gate AS gate
-                      ON gate.derivation_id=validation.derivation_id
-                     AND gate.pcr_sample_id=validation.pcr_sample_id
-                    WHERE validation.derivation_id=:derivation_id
-                      AND validation.validation_status='MATCH_ELIGIBLE'
-                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
-                ), seeds AS (
-                    SELECT eligible.pcr_sample_id, current.sample_id AS current_sample_id,
+                ), current_organisms AS (
+                    SELECT DISTINCT eligible.pcr_sample_id, eligible.microb_sample_id AS current_sample_id,
                            current.patient_id, COALESCE(current.received_at, current.entered_at) AS current_at,
                            isolate.isolate_id AS current_isolate_id, isolate.microorganism_code
                     FROM eligible
@@ -601,17 +534,19 @@ class PCRAnalyticsRepository:
                       ON isolate.analysis_result_id=result.analysis_result_id
                      AND isolate.microorganism_code IS NOT NULL
                      AND {relevant_isolate}
-                    WHERE current.patient_id IS NOT NULL
-                      AND COALESCE(current.received_at, current.entered_at) IS NOT NULL
-                      AND NOT EXISTS (
+                    WHERE NOT EXISTS (
                         SELECT 1 FROM microb_susceptibility_result AS susceptibility
                         WHERE susceptibility.isolate_id=isolate.isolate_id
                           AND susceptibility.interpretation_code='P'
                           AND susceptibility.antibiotic_code IN ('BLE', 'OXA', 'KPC', 'NDM', 'VIM')
-                      )
+                    )
+                ), seeds AS (
+                    SELECT DISTINCT pcr_sample_id, current_sample_id, patient_id, current_at
+                    FROM current_organisms
+                    WHERE patient_id IS NOT NULL AND current_at IS NOT NULL
                 ), previous_samples AS (
-                    SELECT seeds.pcr_sample_id, seeds.current_sample_id, seeds.current_isolate_id,
-                           seeds.microorganism_code, previous.sample_id AS previous_sample_id,
+                    SELECT seeds.pcr_sample_id, seeds.current_sample_id,
+                           previous.sample_id AS previous_sample_id,
                            COALESCE(previous.received_at, previous.entered_at) AS previous_at,
                            analysis.sample_analysis_id,
                            EXISTS (
@@ -622,14 +557,6 @@ class PCRAnalyticsRepository:
                                AND prior_isolate.microorganism_code IS NOT NULL
                                AND {relevant_prior_isolate}
                            ) AS is_positive,
-                           EXISTS (
-                             SELECT 1 FROM microb_analysis_result AS prior_result
-                             JOIN microb_isolate AS prior_isolate
-                               ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
-                             WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
-                               AND prior_isolate.microorganism_code IS NOT NULL
-                               AND {relevant_prior_isolate}
-                           ) AS has_isolate,
                            EXISTS (
                              SELECT 1 FROM microb_analysis_result AS prior_result
                              WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
@@ -652,13 +579,29 @@ class PCRAnalyticsRepository:
                              )
                            ) AS is_negative,
                            EXISTS (
-                             SELECT 1 FROM microb_analysis_result AS prior_result
+                             SELECT 1
+                             FROM current_organisms AS current_organism
+                             JOIN microb_analysis_result AS prior_result
+                               ON prior_result.sample_analysis_id=analysis.sample_analysis_id
                              JOIN microb_isolate AS prior_isolate
                                ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
-                             WHERE prior_result.sample_analysis_id=analysis.sample_analysis_id
-                               AND prior_isolate.microorganism_code=seeds.microorganism_code
-                               AND {relevant_prior_isolate}
-                           ) AS has_same_organism
+                              AND prior_isolate.microorganism_code=current_organism.microorganism_code
+                              AND {relevant_prior_isolate}
+                             WHERE current_organism.pcr_sample_id=seeds.pcr_sample_id
+                           ) AS has_matching_organism,
+                           (
+                             SELECT current_organism.microorganism_code
+                             FROM current_organisms AS current_organism
+                             JOIN microb_analysis_result AS prior_result
+                               ON prior_result.sample_analysis_id=analysis.sample_analysis_id
+                             JOIN microb_isolate AS prior_isolate
+                               ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
+                              AND prior_isolate.microorganism_code=current_organism.microorganism_code
+                              AND {relevant_prior_isolate}
+                             WHERE current_organism.pcr_sample_id=seeds.pcr_sample_id
+                             ORDER BY current_organism.microorganism_code, current_organism.current_isolate_id
+                             LIMIT 1
+                           ) AS matched_microorganism_code
                     FROM seeds
                     JOIN microb_sample AS previous
                       ON previous.patient_id=seeds.patient_id
@@ -673,59 +616,47 @@ class PCRAnalyticsRepository:
                      AND analysis.analysis_kind='BACTERIOLOGICAL'
                 ), timeline AS (
                     SELECT previous_samples.*,
-                           SUM(CASE WHEN is_negative AND NOT has_isolate THEN 1 ELSE 0 END) OVER (
-                             PARTITION BY pcr_sample_id, current_isolate_id
+                           SUM(CASE WHEN is_negative AND NOT is_positive THEN 1 ELSE 0 END) OVER (
+                             PARTITION BY pcr_sample_id
                              ORDER BY previous_at DESC, previous_sample_id DESC
                              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                            ) AS negative_count,
-                           MAX(CASE WHEN is_positive AND NOT has_same_organism THEN 1 ELSE 0 END) OVER (
-                             PARTITION BY pcr_sample_id, current_isolate_id
+                           MAX(CASE WHEN is_positive AND NOT has_matching_organism THEN 1 ELSE 0 END) OVER (
+                             PARTITION BY pcr_sample_id
                              ORDER BY previous_at DESC, previous_sample_id DESC
                              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                            ) AS organism_barrier
                     FROM previous_samples
-                ), evidence AS (
-                    SELECT timeline.*, isolate.isolate_id AS evidence_isolate_id,
-                           susceptibility.antibiotic_code AS marker_code,
+                ), selected AS (
+                    SELECT timeline.*,
                            ROW_NUMBER() OVER (
-                             PARTITION BY timeline.pcr_sample_id, timeline.current_isolate_id,
-                                          susceptibility.antibiotic_code
-                             ORDER BY timeline.previous_at DESC, timeline.previous_sample_id DESC
+                             PARTITION BY pcr_sample_id
+                             ORDER BY previous_at DESC, previous_sample_id DESC
                            ) AS position
                     FROM timeline
-                    JOIN microb_analysis_result AS result
-                      ON result.sample_analysis_id=timeline.sample_analysis_id
-                    JOIN microb_isolate AS isolate
-                      ON isolate.analysis_result_id=result.analysis_result_id
-                     AND isolate.microorganism_code=timeline.microorganism_code
-                     AND {relevant_isolate}
-                    JOIN microb_susceptibility_result AS susceptibility
-                      ON susceptibility.isolate_id=isolate.isolate_id
-                     AND susceptibility.interpretation_code='P'
-                     AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
-                    WHERE timeline.has_same_organism
-                      AND timeline.organism_barrier=0
-                      AND timeline.negative_count <= :max_negatives
+                    WHERE has_matching_organism
+                      AND organism_barrier=0
+                      AND negative_count <= :max_negatives
                 )
-                INSERT INTO pcr_sil_link_candidate (
+                INSERT INTO pcr_sil_retrospective_evidence (
                     derivation_id, pcr_sample_id, current_microb_sample_id,
-                    current_isolate_id, microorganism_code, evidence_microb_sample_id,
-                    evidence_isolate_id, marker_code, candidate_kind, candidate_status,
-                    days_difference, negative_count, policy_version, reason, details_json
+                    evidence_microb_sample_id, matched_microorganism_code,
+                    evidence_status, days_difference, negative_count,
+                    policy_version, reason, details_json
                 )
-                SELECT :derivation_id, evidence.pcr_sample_id, evidence.current_sample_id,
-                       evidence.current_isolate_id, evidence.microorganism_code,
-                       evidence.previous_sample_id, evidence.evidence_isolate_id,
-                       evidence.marker_code, 'PRIOR', 'ACCEPTED',
-                       EXTRACT(DAY FROM (COALESCE(current_sample.received_at, current_sample.entered_at) - evidence.previous_at))::integer,
-                       evidence.negative_count, :policy_version,
-                       'First compatible prior 068/PMDR isolate with a positive carbapenemase marker.',
-                       jsonb_build_object('organism_exact_match', TRUE)
-                FROM evidence
-                JOIN microb_sample AS current_sample ON current_sample.sample_id=evidence.current_sample_id
-                WHERE evidence.position=1
+                SELECT :derivation_id, selected.pcr_sample_id, selected.current_sample_id,
+                       selected.previous_sample_id, selected.matched_microorganism_code,
+                       'ACCEPTED',
+                       EXTRACT(DAY FROM (current_sample.current_at - selected.previous_at))::integer,
+                       selected.negative_count, :policy_version,
+                       'Nearest compatible prior 068/PMDR sample for a current organism.',
+                       jsonb_build_object('search_scope', 'ALL_CURRENT_ORGANISMS',
+                                          'stops_after_first_match', TRUE)
+                FROM selected
+                JOIN seeds AS current_sample ON current_sample.pcr_sample_id=selected.pcr_sample_id
+                WHERE selected.position=1
             """), params)
-            conn.execute(text(f"""
+            conn.execute(text("""
                 WITH eligible AS (
                     SELECT DISTINCT validation.pcr_sample_id, validation.microb_sample_id
                     FROM pcr_microb_well_validation AS validation
@@ -736,45 +667,78 @@ class PCRAnalyticsRepository:
                       AND validation.validation_status='MATCH_ELIGIBLE'
                       AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                 )
+                INSERT INTO pcr_sil_retrospective_evidence (
+                    derivation_id, pcr_sample_id, current_microb_sample_id,
+                    evidence_microb_sample_id, matched_microorganism_code,
+                    evidence_status, days_difference, negative_count,
+                    policy_version, reason, details_json
+                )
+                SELECT :derivation_id, eligible.pcr_sample_id, eligible.microb_sample_id,
+                       NULL, NULL,
+                       CASE WHEN classification.culture_category IN ('CULTURE_NEGATIVE', 'CULTURE_NOT_PROCESSED')
+                            THEN 'NOT_APPLICABLE' ELSE 'NO_EVIDENCE' END,
+                       NULL, NULL,
+                       :policy_version,
+                       CASE WHEN classification.culture_category IN ('CULTURE_NEGATIVE', 'CULTURE_NOT_PROCESSED')
+                              THEN 'Current culture category does not start retrospective search.'
+                            ELSE 'No compatible prior sample for a current uncharacterized organism was found.' END,
+                       jsonb_build_object('culture_category', classification.culture_category)
+                FROM eligible
+                JOIN pcr_sil_culture_classification AS classification
+                  ON classification.derivation_id=:derivation_id
+                 AND classification.microb_sample_id=eligible.microb_sample_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM pcr_sil_retrospective_evidence AS accepted
+                    WHERE accepted.derivation_id=:derivation_id
+                      AND accepted.pcr_sample_id=eligible.pcr_sample_id
+                )
+            """), params)
+            # Candidate rows are audit detail for the one selected historical
+            # sample.  Direct current-culture evidence is deliberately not a
+            # candidate: it is a binary culture-level profile.
+            conn.execute(text(f"""
                 INSERT INTO pcr_sil_link_candidate (
                     derivation_id, pcr_sample_id, current_microb_sample_id,
                     current_isolate_id, microorganism_code, evidence_microb_sample_id,
                     evidence_isolate_id, marker_code, candidate_kind, candidate_status,
                     days_difference, negative_count, policy_version, reason, details_json
                 )
-                SELECT :derivation_id, eligible.pcr_sample_id, eligible.microb_sample_id,
-                       isolate.isolate_id, isolate.microorganism_code,
-                       NULL, NULL, NULL, 'SEARCH', 'NO_EVIDENCE', NULL, NULL,
-                       :policy_version,
-                       'No compatible prior positive carbapenemase evidence was found.',
-                       jsonb_build_object('culture_category', classification.culture_category)
-                FROM eligible
-                JOIN pcr_sil_culture_classification AS classification
-                  ON classification.derivation_id=:derivation_id
-                 AND classification.microb_sample_id=eligible.microb_sample_id
-                 AND classification.culture_category='CULTURE_POSITIVE'
-                JOIN microb_analysis_result AS result
-                  ON result.sample_analysis_id=classification.sample_analysis_id
-                JOIN microb_isolate AS isolate
-                  ON isolate.analysis_result_id=result.analysis_result_id
-                 AND isolate.microorganism_code IS NOT NULL
-                 AND {relevant_isolate}
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM microb_susceptibility_result AS susceptibility
-                    WHERE susceptibility.isolate_id=isolate.isolate_id
-                      AND susceptibility.interpretation_code='P'
-                      AND susceptibility.antibiotic_code IN ('BLE', 'OXA', 'KPC', 'NDM', 'VIM')
-                )
-                  AND NOT EXISTS (
-                    SELECT 1 FROM pcr_sil_link_candidate AS accepted
-                    WHERE accepted.derivation_id=:derivation_id
-                      AND accepted.pcr_sample_id=eligible.pcr_sample_id
-                      AND accepted.current_isolate_id=isolate.isolate_id
-                      AND accepted.candidate_kind='PRIOR'
-                      AND accepted.candidate_status='ACCEPTED'
-                )
+                SELECT :derivation_id, evidence.pcr_sample_id, evidence.current_microb_sample_id,
+                       current_isolate.isolate_id, current_isolate.microorganism_code,
+                       evidence.evidence_microb_sample_id, prior_isolate.isolate_id,
+                       susceptibility.antibiotic_code, 'PRIOR', 'ACCEPTED',
+                       evidence.days_difference, evidence.negative_count, :policy_version,
+                       'Marker from the sole selected prior sample.',
+                       jsonb_build_object('organism_exact_match', TRUE,
+                                          'single_prior_sample', TRUE)
+                FROM pcr_sil_retrospective_evidence AS evidence
+                JOIN pcr_sil_culture_classification AS current_classification
+                  ON current_classification.derivation_id=evidence.derivation_id
+                 AND current_classification.microb_sample_id=evidence.current_microb_sample_id
+                JOIN microb_analysis_result AS current_result
+                  ON current_result.sample_analysis_id=current_classification.sample_analysis_id
+                JOIN microb_isolate AS current_isolate
+                  ON current_isolate.analysis_result_id=current_result.analysis_result_id
+                 AND current_isolate.microorganism_code=evidence.matched_microorganism_code
+                 AND {relevant_current_isolate}
+                JOIN microb_sample_analysis AS prior_analysis
+                  ON prior_analysis.sample_id=evidence.evidence_microb_sample_id
+                 AND prior_analysis.analysis_code='PMDR'
+                 AND prior_analysis.analysis_kind='BACTERIOLOGICAL'
+                JOIN microb_analysis_result AS prior_result
+                  ON prior_result.sample_analysis_id=prior_analysis.sample_analysis_id
+                JOIN microb_isolate AS prior_isolate
+                  ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
+                 AND prior_isolate.microorganism_code=evidence.matched_microorganism_code
+                 AND {relevant_prior_isolate}
+                JOIN microb_susceptibility_result AS susceptibility
+                  ON susceptibility.isolate_id=prior_isolate.isolate_id
+                 AND susceptibility.interpretation_code='P'
+                 AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
+                WHERE evidence.derivation_id=:derivation_id
+                  AND evidence.evidence_status='ACCEPTED'
             """), params)
-            result = conn.execute(text("""
+            result = conn.execute(text(f"""
                 WITH selections AS (
                     SELECT selection.derivation_id, selection.pcr_sample_id, selection.run_type,
                            selection.canonical_target, interpretation.call
@@ -782,42 +746,92 @@ class PCRAnalyticsRepository:
                     LEFT JOIN pcr_interpretation AS interpretation
                       ON interpretation.interpretation_id=selection.preferred_interpretation_id
                     WHERE selection.derivation_id=:derivation_id
-                ), chosen AS (
-                    SELECT selections.*, candidate.candidate_id, candidate.candidate_kind,
-                           candidate.marker_code,
-                           ROW_NUMBER() OVER (
-                             PARTITION BY selections.derivation_id, selections.pcr_sample_id,
-                                          selections.run_type, selections.canonical_target
-                             ORDER BY CASE candidate.candidate_kind WHEN 'DIRECT' THEN 0 ELSE 1 END,
-                                      candidate.candidate_id
-                           ) AS position
+                ), direct_markers AS (
+                    SELECT validation.pcr_sample_id, susceptibility.antibiotic_code AS marker_code
+                    FROM pcr_microb_well_validation AS validation
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=validation.derivation_id
+                     AND gate.pcr_sample_id=validation.pcr_sample_id
+                    JOIN pcr_sil_culture_classification AS classification
+                      ON classification.derivation_id=validation.derivation_id
+                     AND classification.microb_sample_id=validation.microb_sample_id
+                    JOIN microb_analysis_result AS current_result
+                      ON current_result.sample_analysis_id=classification.sample_analysis_id
+                    JOIN microb_isolate AS current_isolate
+                      ON current_isolate.analysis_result_id=current_result.analysis_result_id
+                     AND current_isolate.microorganism_code IS NOT NULL
+                     AND {relevant_current_isolate}
+                    JOIN microb_susceptibility_result AS susceptibility
+                      ON susceptibility.isolate_id=current_isolate.isolate_id
+                     AND susceptibility.interpretation_code='P'
+                     AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
+                    WHERE validation.derivation_id=:derivation_id
+                      AND validation.validation_status='MATCH_ELIGIBLE'
+                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
+                ), retrospective_markers AS (
+                    SELECT evidence.pcr_sample_id, susceptibility.antibiotic_code AS marker_code
+                    FROM pcr_sil_retrospective_evidence AS evidence
+                    JOIN microb_sample_analysis AS prior_analysis
+                      ON prior_analysis.sample_id=evidence.evidence_microb_sample_id
+                     AND prior_analysis.analysis_code='PMDR'
+                     AND prior_analysis.analysis_kind='BACTERIOLOGICAL'
+                    JOIN microb_analysis_result AS prior_result
+                      ON prior_result.sample_analysis_id=prior_analysis.sample_analysis_id
+                    JOIN microb_isolate AS prior_isolate
+                      ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
+                     AND prior_isolate.microorganism_code IS NOT NULL
+                     AND {relevant_prior_isolate}
+                    JOIN microb_susceptibility_result AS susceptibility
+                      ON susceptibility.isolate_id=prior_isolate.isolate_id
+                     AND susceptibility.interpretation_code='P'
+                     AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
+                    WHERE evidence.derivation_id=:derivation_id
+                      AND evidence.evidence_status='ACCEPTED'
+                ), resolved AS (
+                    SELECT selections.*, evidence.evidence_status,
+                           CASE WHEN evidence.evidence_status='ACCEPTED'
+                                THEN 'PRIOR_SINGLE_SAMPLE'
+                                ELSE 'DIRECT_CURRENT_CULTURE' END AS evidence_scope,
+                           CASE WHEN evidence.evidence_status='ACCEPTED'
+                                THEN EXISTS (
+                                  SELECT 1 FROM retrospective_markers AS marker
+                                  WHERE marker.pcr_sample_id=selections.pcr_sample_id
+                                    AND marker.marker_code=CASE selections.canonical_target
+                                      WHEN 'OXA48' THEN 'OXA' ELSE selections.canonical_target END
+                                )
+                                ELSE EXISTS (
+                                  SELECT 1 FROM direct_markers AS marker
+                                  WHERE marker.pcr_sample_id=selections.pcr_sample_id
+                                    AND marker.marker_code=CASE selections.canonical_target
+                                      WHEN 'OXA48' THEN 'OXA' ELSE selections.canonical_target END
+                                )
+                           END AS marker_detected
                     FROM selections
-                    LEFT JOIN pcr_sil_link_candidate AS candidate
-                      ON candidate.derivation_id=selections.derivation_id
-                     AND candidate.pcr_sample_id=selections.pcr_sample_id
-                     AND candidate.candidate_status='ACCEPTED'
-                     AND candidate.marker_code=CASE selections.canonical_target
-                       WHEN 'OXA48' THEN 'OXA' ELSE selections.canonical_target END
+                    LEFT JOIN pcr_sil_retrospective_evidence AS evidence
+                      ON evidence.derivation_id=selections.derivation_id
+                     AND evidence.pcr_sample_id=selections.pcr_sample_id
                 )
                 INSERT INTO pcr_sil_result_link (
                     derivation_id, pcr_sample_id, run_type, canonical_target, candidate_id,
                     link_type, concordance, policy_version, reason, details_json
                 )
-                SELECT derivation_id, pcr_sample_id, run_type, canonical_target, candidate_id,
-                       CASE WHEN candidate_id IS NULL THEN 'NO_EVIDENCE'
+                SELECT derivation_id, pcr_sample_id, run_type, canonical_target, NULL,
+                       CASE WHEN NOT marker_detected THEN 'NO_EVIDENCE'
                             WHEN call='NEGATIVE' THEN 'DISCORDANT'
-                            WHEN candidate_kind='DIRECT' THEN 'DIRECT'
+                            WHEN evidence_scope='DIRECT_CURRENT_CULTURE' THEN 'DIRECT'
                             ELSE 'PRIOR_COMPATIBLE' END,
-                       CASE WHEN candidate_id IS NULL THEN 'NOT_ASSESSABLE'
+                       CASE WHEN NOT marker_detected THEN 'NOT_ASSESSABLE'
                             WHEN call='POSITIVE' THEN 'CONCORDANT'
                             WHEN call='NEGATIVE' THEN 'DISCORDANT'
                             ELSE 'NOT_ASSESSABLE' END,
                        :policy_version,
-                       CASE WHEN candidate_id IS NULL THEN 'No compatible carbapenemase evidence in SIL.'
-                            WHEN candidate_kind='DIRECT' THEN 'Direct current SIL evidence.'
-                            ELSE 'Compatible historical SIL evidence.' END,
-                       jsonb_build_object('pcr_call', call, 'marker_code', marker_code)
-                FROM chosen WHERE position=1
+                       CASE WHEN NOT marker_detected THEN 'No compatible carbapenemase evidence in SIL.'
+                            WHEN evidence_scope='DIRECT_CURRENT_CULTURE' THEN 'Binary evidence from the current SIL culture.'
+                            ELSE 'Binary evidence from the sole selected prior SIL sample.' END,
+                       jsonb_build_object('pcr_call', call,
+                                          'marker_code', CASE canonical_target WHEN 'OXA48' THEN 'OXA' ELSE canonical_target END,
+                                          'evidence_scope', evidence_scope)
+                FROM resolved
             """), params)
             return int(result.rowcount if result.rowcount is not None else 0)
 
@@ -935,7 +949,7 @@ class PCRAnalyticsRepository:
             return int(result.rowcount if result.rowcount is not None else 0)
 
     def summarize_sil_culture_markers(self, derivation_id: int) -> int:
-        """Aggregate direct carbapenemase markers by organism and by culture.
+        """Aggregate direct carbapenemase markers by isolate and culture.
 
         This deliberately reads the current culture only.  Retrospective
         candidates remain in ``pcr_sil_link_candidate`` and are not folded into
@@ -956,9 +970,9 @@ class PCRAnalyticsRepository:
                     WHERE validation.derivation_id=:derivation_id
                       AND validation.validation_status='MATCH_ELIGIBLE'
                       AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
-                ), organism_markers AS (
+                ), isolate_markers AS (
                     SELECT eligible.pcr_sample_id, eligible.microb_sample_id,
-                           isolate.microorganism_code,
+                           isolate.isolate_id, isolate.isolate_number, isolate.microorganism_code,
                            COALESCE(BOOL_OR(susceptibility.antibiotic_code='OXA'), FALSE) AS oxa_detected,
                            COALESCE(BOOL_OR(susceptibility.antibiotic_code='KPC'), FALSE) AS kpc_detected,
                            COALESCE(BOOL_OR(susceptibility.antibiotic_code='NDM'), FALSE) AS ndm_detected,
@@ -967,8 +981,7 @@ class PCRAnalyticsRepository:
                              jsonb_agg(DISTINCT susceptibility.antibiotic_code)
                                FILTER (WHERE susceptibility.antibiotic_code IS NOT NULL),
                              '[]'::jsonb
-                           ) AS marker_codes,
-                           COUNT(DISTINCT isolate.isolate_id) AS isolate_count
+                           ) AS marker_codes
                     FROM eligible
                     JOIN pcr_sil_culture_classification AS classification
                       ON classification.derivation_id=:derivation_id
@@ -984,7 +997,35 @@ class PCRAnalyticsRepository:
                      AND susceptibility.interpretation_code='P'
                      AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
                     GROUP BY eligible.pcr_sample_id, eligible.microb_sample_id,
-                             isolate.microorganism_code
+                             isolate.isolate_id, isolate.isolate_number, isolate.microorganism_code
+                )
+                INSERT INTO pcr_sil_isolate_marker_summary (
+                    derivation_id, pcr_sample_id, microb_sample_id, isolate_id,
+                    microorganism_code, isolate_number,
+                    oxa_detected, kpc_detected, ndm_detected, vim_detected,
+                    marker_codes_json, details_json
+                )
+                SELECT :derivation_id, pcr_sample_id, microb_sample_id, isolate_id,
+                       microorganism_code, isolate_number,
+                       oxa_detected, kpc_detected, ndm_detected, vim_detected,
+                       marker_codes,
+                       jsonb_build_object('evidence_scope', 'DIRECT_CURRENT_CULTURE')
+                FROM isolate_markers
+            """), {
+                "derivation_id": derivation_id,
+                "irrelevant_organism_pattern": IRRELEVANT_MICROORGANISM_PATTERN,
+            })
+            conn.execute(text("""
+                WITH organism_markers AS (
+                    SELECT pcr_sample_id, microb_sample_id, microorganism_code,
+                           BOOL_OR(oxa_detected) AS oxa_detected,
+                           BOOL_OR(kpc_detected) AS kpc_detected,
+                           BOOL_OR(ndm_detected) AS ndm_detected,
+                           BOOL_OR(vim_detected) AS vim_detected,
+                           COUNT(*) AS isolate_count
+                    FROM pcr_sil_isolate_marker_summary AS isolate
+                    WHERE isolate.derivation_id=:derivation_id
+                    GROUP BY pcr_sample_id, microb_sample_id, microorganism_code
                 )
                 INSERT INTO pcr_sil_organism_marker_summary (
                     derivation_id, pcr_sample_id, microb_sample_id, microorganism_code,
@@ -993,13 +1034,16 @@ class PCRAnalyticsRepository:
                 )
                 SELECT :derivation_id, pcr_sample_id, microb_sample_id, microorganism_code,
                        oxa_detected, kpc_detected, ndm_detected, vim_detected,
-                       marker_codes, isolate_count,
-                       jsonb_build_object('evidence_scope', 'DIRECT_CURRENT_CULTURE')
+                       to_jsonb(ARRAY_REMOVE(ARRAY[
+                         CASE WHEN oxa_detected THEN 'OXA' END,
+                         CASE WHEN kpc_detected THEN 'KPC' END,
+                         CASE WHEN ndm_detected THEN 'NDM' END,
+                         CASE WHEN vim_detected THEN 'VIM' END
+                       ], NULL)), isolate_count,
+                       jsonb_build_object('evidence_scope', 'DIRECT_CURRENT_CULTURE',
+                                          'aggregation', 'BINARY_UNION_ACROSS_ISOLATES')
                 FROM organism_markers
-            """), {
-                "derivation_id": derivation_id,
-                "irrelevant_organism_pattern": IRRELEVANT_MICROORGANISM_PATTERN,
-            })
+            """), {"derivation_id": derivation_id})
             result = conn.execute(text("""
                 WITH culture_markers AS (
                     SELECT pcr_sample_id, microb_sample_id,
@@ -1007,8 +1051,9 @@ class PCRAnalyticsRepository:
                            BOOL_OR(kpc_detected) AS kpc_detected,
                            BOOL_OR(ndm_detected) AS ndm_detected,
                            BOOL_OR(vim_detected) AS vim_detected,
-                           COUNT(*) AS organism_count, SUM(isolate_count) AS isolate_count
-                    FROM pcr_sil_organism_marker_summary
+                           COUNT(DISTINCT microorganism_code) AS organism_count,
+                           COUNT(*) AS isolate_count
+                    FROM pcr_sil_isolate_marker_summary
                     WHERE derivation_id=:derivation_id
                     GROUP BY pcr_sample_id, microb_sample_id
                 )
@@ -1534,9 +1579,11 @@ def _clear_derived_model(conn: Connection) -> None:
         "pcr_sample_result",
         "pcr_sample_scope_gate",
         "pcr_sil_culture_marker_summary",
+        "pcr_sil_isolate_marker_summary",
         "pcr_sil_organism_marker_summary",
         "pcr_sil_result_link",
         "pcr_sil_link_candidate",
+        "pcr_sil_retrospective_evidence",
         "pcr_sil_culture_classification",
         "pcr_microb_well_validation",
         "pcr_result_selection",

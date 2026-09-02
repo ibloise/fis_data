@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, insert, text
 from fis_data.etl.exports import export_downstream, format_names
 from fis_data.etl.exports.downstream import _xlsx_value
 from fis_data.schema import (
+    create_views,
     create_schema,
     ctl_source,
     pcr_derivation_run,
@@ -19,6 +20,45 @@ from fis_data.schema import (
     pcr_result_selection,
     pcr_target_qc,
 )
+
+
+def test_sil_organism_view_keeps_samples_without_an_organism_summary() -> None:
+    class CapturingConnection:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement) -> None:
+            self.statements.append(str(statement))
+
+    class CapturingTransaction:
+        def __init__(self, connection: CapturingConnection) -> None:
+            self.connection = connection
+
+        def __enter__(self) -> CapturingConnection:
+            return self.connection
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+    class CapturingEngine:
+        dialect = type("Dialect", (), {"name": "postgresql"})()
+
+        def __init__(self, connection: CapturingConnection) -> None:
+            self.connection = connection
+
+        def begin(self) -> CapturingTransaction:
+            return CapturingTransaction(self.connection)
+
+    connection = CapturingConnection()
+    create_views(CapturingEngine(connection))
+    statement = next(
+        sql for sql in connection.statements
+        if sql.startswith("CREATE VIEW v_downstream_sil_pcr_organism")
+    )
+
+    assert "LEFT JOIN pcr_sil_organism_marker_summary AS organism" in statement
+    assert "WHERE organism.derivation_id" not in statement
+    assert "COALESCE(organism.oxa_detected, FALSE)::int" in statement
 
 
 def test_pcr_qc_error_export_contains_unpromoted_samples_and_other_context(tmp_path) -> None:

@@ -19,8 +19,9 @@ from ...schema import (
     microb_patient, microb_sample, microb_sample_analysis,
     microb_sample_observation, microb_susceptibility_result,
     pcr_microb_well_validation, pcr_sil_culture_classification,
-    pcr_sil_culture_marker_summary, pcr_sil_link_candidate,
-    pcr_sil_organism_marker_summary, pcr_sil_result_link,
+    pcr_sil_culture_marker_summary, pcr_sil_isolate_marker_summary,
+    pcr_sil_link_candidate, pcr_sil_organism_marker_summary,
+    pcr_sil_result_link, pcr_sil_retrospective_evidence,
     ref_microb_catalog, ref_microb_catalog_entry, stg_microb_antibiogram,
     stg_microb_technique,
 )
@@ -92,9 +93,11 @@ class MicrobNormalizer:
         # CASCADE: it becomes stale when microb_sample IDs are rebuilt.
         tables = (
             pcr_sil_culture_marker_summary,
+            pcr_sil_isolate_marker_summary,
             pcr_sil_organism_marker_summary,
             pcr_sil_result_link,
             pcr_sil_link_candidate,
+            pcr_sil_retrospective_evidence,
             pcr_sil_culture_classification,
             pcr_microb_well_validation,
             microb_susceptibility_result,

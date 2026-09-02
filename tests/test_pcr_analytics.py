@@ -162,7 +162,7 @@ def test_sil_queries_apply_the_irrelevant_organism_policy() -> None:
     )
     repository.summarize_sil_culture_markers(7)
 
-    assert len(connection.executions) == 7
+    assert len(connection.executions) == 8
     assert all(
         params["irrelevant_organism_pattern"]
         == "Candida|Enterococcus|Stenotrophomonas|Acinetobacter"
@@ -172,7 +172,11 @@ def test_sil_queries_apply_the_irrelevant_organism_policy() -> None:
     assert "ignored_organism.description ~* :irrelevant_organism_pattern" in (
         connection.executions[0][0]
     )
-    assert "AND NOT has_isolate" in connection.executions[2][0]
+    assert "PARTITION BY pcr_sample_id" in connection.executions[1][0]
+    assert "stops_after_first_match" in connection.executions[1][0]
+    assert "'DIRECT', 'ACCEPTED'" not in connection.executions[3][0]
+    assert "NULL," in connection.executions[4][0]
+    assert all("{relevant_" not in statement for statement, _ in connection.executions)
     assert "ignored_organism.description ~* :irrelevant_organism_pattern" in (
         connection.executions[5][0]
     )

@@ -71,24 +71,27 @@ Por ello, un marcador cuenta como detectado solo cuando el código anterior
 tiene `interpretation_code = 'P'` (o su futura configuración equivalente).
 
 Un aislado se considera **ya caracterizado** si tiene BLEE positiva o una
-carbapenemasa positiva (`OXA`, `KPC`, `NDM` o `VIM`). Para un microorganismo
-actual ya caracterizado no se realiza búsqueda retrospectiva. La búsqueda se
-reserva para microorganismos positivos sin caracterización de BLEE ni de
-carbapenemasa.
+carbapenemasa positiva (`OXA`, `KPC`, `NDM` o `VIM`). La evidencia directa del
+cultivo es una unión binaria de los marcadores positivos de todos sus aislados
+relevantes: por ejemplo, *E. coli*/KPC y *Klebsiella*/NDM producen `KPC+NDM`.
+El detalle conserva una fila por aislado; la especie no compite por la diana
+PCR directa.
 
 ## Búsqueda retrospectiva
 
-Se activa solo cuando la muestra SIL actual es `CULTURE_POSITIVE`, contiene
-microorganismo y dicho aislado está sin caracterizar. La búsqueda se limita a
-muestras anteriores que cumplan todas estas condiciones:
+Se activa solo cuando la muestra SIL actual es `CULTURE_POSITIVE` y tiene al
+menos un aislado relevante sin caracterizar. La iteración conserva el conjunto
+de organismos actuales, pero la decisión es por cultivo: se selecciona como
+máximo una muestra previa. La búsqueda se limita a muestras anteriores que
+cumplan todas estas condiciones:
 
 - Pertenecen al mismo paciente.
 - Son anteriores por fecha clínica (`received_at`, con `entered_at` como
   respaldo si fuera necesario).
 - Son tipo de muestra `068`.
 - Tienen análisis `PMDR` de clase `BACTERIOLOGICAL`.
-- Contienen el mismo `microorganism_code` exacto. No se aplican equivalencias
-  taxonómicas ni comparaciones por nombre libre.
+- Contienen al menos uno de los `microorganism_code` actuales exactos. No se
+  aplican equivalencias taxonómicas ni comparaciones por nombre libre.
 
 Los parámetros serán versionados y configurables:
 
@@ -99,23 +102,30 @@ Los parámetros serán versionados y configurables:
 
 Las muestras previas `CULTURE_NEGATIVE` incrementan el contador. Las
 `CULTURE_NOT_PROCESSED` no se convierten en positivas ni aportan evidencia; se
-mantiene su trazabilidad y la búsqueda puede continuar. Si se supera el máximo
-de negativos, se excede la ventana temporal, desaparece el microorganismo o
-no hay muestra previa, la búsqueda termina sin herencia.
+mantiene su trazabilidad y la búsqueda puede continuar. La primera muestra
+previa compatible que contiene cualquiera de los organismos actuales detiene
+la iteración de todos ellos; no se buscan muestras distintas para *E. coli* y
+*Klebsiella*. Si se supera el máximo de negativos, se excede la ventana
+temporal, aparece un cultivo positivo sin ningún organismo actual o no hay
+muestra previa, la búsqueda termina sin herencia.
 
-La primera evidencia previa compatible con un marcador de carbapenemasa
-positivo será la candidata heredada. BLEE sirve para impedir la búsqueda en el
-aislado actual, pero no sustituye por sí sola una evidencia de OXA/KPC/NDM/VIM
-para conciliar un target PCR.
+La muestra previa seleccionada aporta un perfil binario con todos sus
+marcadores OXA/KPC/NDM/VIM relevantes. Ese perfil se usa para la conciliación
+PCR cuando existe; si no procede o no encuentra muestra previa, se usa el
+perfil binario directo del cultivo actual. BLEE sirve para impedir la búsqueda
+en el aislado actual, pero no sustituye por sí sola una evidencia de
+OXA/KPC/NDM/VIM para conciliar un target PCR.
 
 ## Persistencia y auditoría propuestas
 
 La implementación deberá mantener candidatos y decisión final separados:
 
-- `pcr_sil_link_candidate`: evidencia directa o previa, muestra origen,
-  muestra evaluada, aislado, microorganismo, marcador, días de distancia,
-  negativos atravesados y motivo de aceptación/rechazo.
-- `pcr_sil_result_link`: enlace elegido por resultado PCR/target, con tipo
+- `pcr_sil_isolate_marker_summary`: evidencia directa por aislado.
+- `pcr_sil_retrospective_evidence`: única muestra previa elegida, o el motivo
+  de no aplicar/no encontrar búsqueda.
+- `pcr_sil_link_candidate`: detalle de los marcadores del aislado coincidente
+  en esa muestra retrospectiva única.
+- `pcr_sil_result_link`: enlace por resultado PCR/target, con tipo
   `DIRECT`, `PRIOR_COMPATIBLE`, `NO_EVIDENCE`, `AMBIGUOUS` o `DISCORDANT`.
 
 Ambas capas estarán asociadas a `derivation_id`, a la versión de la política y
@@ -143,6 +153,7 @@ fis-data derive-pcr --algorithm-version melting-v1 --rebuild \
 ```
 
 Las tablas derivadas son `pcr_sil_culture_classification`,
+`pcr_sil_isolate_marker_summary`, `pcr_sil_retrospective_evidence`,
 `pcr_sil_link_candidate` y `pcr_sil_result_link`. Un `--rebuild` de PCR o de
 Microb las elimina junto con sus dependencias antes de recalcularlas.
 
