@@ -409,8 +409,9 @@ class PCRAnalyticsRepository:
         Direct evidence is the binary union of the current culture's relevant
         isolates.  When an uncharacterized current isolate starts a historical
         search, the first compatible prior sample found for *any* current
-        organism becomes the sole retrospective evidence sample.  Its binary
-        profile replaces the current direct profile for that resolution.
+        organism becomes the sole retrospective evidence sample. Only markers
+        attached to exact current organism codes are inherited. An unmatched
+        current organism stays 0000; it never starts another search.
         """
 
         if self.engine.dialect.name != "postgresql":
@@ -522,7 +523,13 @@ class PCRAnalyticsRepository:
                 ), current_organisms AS (
                     SELECT DISTINCT eligible.pcr_sample_id, eligible.microb_sample_id AS current_sample_id,
                            current.patient_id, COALESCE(current.received_at, current.entered_at) AS current_at,
-                           isolate.isolate_id AS current_isolate_id, isolate.microorganism_code
+                           isolate.isolate_id AS current_isolate_id, isolate.microorganism_code,
+                           NOT EXISTS (
+                               SELECT 1 FROM microb_susceptibility_result AS susceptibility
+                               WHERE susceptibility.isolate_id=isolate.isolate_id
+                                 AND susceptibility.interpretation_code='P'
+                                 AND susceptibility.antibiotic_code IN ('BLE', 'OXA', 'KPC', 'NDM', 'VIM')
+                           ) AS is_uncharacterized
                     FROM eligible
                     JOIN microb_sample AS current ON current.sample_id=eligible.microb_sample_id
                     JOIN pcr_sil_culture_classification AS classification
@@ -534,16 +541,11 @@ class PCRAnalyticsRepository:
                       ON isolate.analysis_result_id=result.analysis_result_id
                      AND isolate.microorganism_code IS NOT NULL
                      AND {relevant_isolate}
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM microb_susceptibility_result AS susceptibility
-                        WHERE susceptibility.isolate_id=isolate.isolate_id
-                          AND susceptibility.interpretation_code='P'
-                          AND susceptibility.antibiotic_code IN ('BLE', 'OXA', 'KPC', 'NDM', 'VIM')
-                    )
                 ), seeds AS (
                     SELECT DISTINCT pcr_sample_id, current_sample_id, patient_id, current_at
                     FROM current_organisms
                     WHERE patient_id IS NOT NULL AND current_at IS NOT NULL
+                      AND is_uncharacterized
                 ), previous_samples AS (
                     SELECT seeds.pcr_sample_id, seeds.current_sample_id,
                            previous.sample_id AS previous_sample_id,
@@ -588,6 +590,7 @@ class PCRAnalyticsRepository:
                               AND prior_isolate.microorganism_code=current_organism.microorganism_code
                               AND {relevant_prior_isolate}
                              WHERE current_organism.pcr_sample_id=seeds.pcr_sample_id
+                               AND current_organism.current_sample_id=seeds.current_sample_id
                            ) AS has_matching_organism,
                            (
                              SELECT current_organism.microorganism_code
@@ -599,6 +602,7 @@ class PCRAnalyticsRepository:
                               AND prior_isolate.microorganism_code=current_organism.microorganism_code
                               AND {relevant_prior_isolate}
                              WHERE current_organism.pcr_sample_id=seeds.pcr_sample_id
+                               AND current_organism.current_sample_id=seeds.current_sample_id
                              ORDER BY current_organism.microorganism_code, current_organism.current_isolate_id
                              LIMIT 1
                            ) AS matched_microorganism_code
@@ -693,9 +697,10 @@ class PCRAnalyticsRepository:
                       AND accepted.pcr_sample_id=eligible.pcr_sample_id
                 )
             """), params)
-            # Candidate rows are audit detail for the one selected historical
-            # sample.  Direct current-culture evidence is deliberately not a
-            # candidate: it is a binary culture-level profile.
+            # Inherit for ALL original organism codes present in the sole
+            # selected sample. matched_microorganism_code only audits the
+            # first match that selected that sample; it is not an inheritance
+            # filter. Direct observations remain in their own summaries.
             conn.execute(text(f"""
                 INSERT INTO pcr_sil_link_candidate (
                     derivation_id, pcr_sample_id, current_microb_sample_id,
@@ -706,10 +711,16 @@ class PCRAnalyticsRepository:
                 SELECT :derivation_id, evidence.pcr_sample_id, evidence.current_microb_sample_id,
                        current_isolate.isolate_id, current_isolate.microorganism_code,
                        evidence.evidence_microb_sample_id, prior_isolate.isolate_id,
-                       susceptibility.antibiotic_code, 'PRIOR', 'ACCEPTED',
+                       susceptibility.antibiotic_code, 'PRIOR',
+                       CASE WHEN susceptibility.antibiotic_code IS NOT NULL
+                            THEN 'ACCEPTED' ELSE 'NO_EVIDENCE' END,
                        evidence.days_difference, evidence.negative_count, :policy_version,
-                       'Marker from the sole selected prior sample.',
-                       jsonb_build_object('organism_exact_match', TRUE,
+                       CASE WHEN prior_isolate.isolate_id IS NULL
+                              THEN 'Original organism absent from selected prior sample; no further search.'
+                            WHEN susceptibility.antibiotic_code IS NULL
+                              THEN 'Matching prior organism has no positive carbapenemase marker.'
+                            ELSE 'Marker inherited by exact organism code from the sole selected prior sample.' END,
+                       jsonb_build_object('organism_exact_match', prior_isolate.isolate_id IS NOT NULL,
                                           'single_prior_sample', TRUE)
                 FROM pcr_sil_retrospective_evidence AS evidence
                 JOIN pcr_sil_culture_classification AS current_classification
@@ -719,7 +730,7 @@ class PCRAnalyticsRepository:
                   ON current_result.sample_analysis_id=current_classification.sample_analysis_id
                 JOIN microb_isolate AS current_isolate
                   ON current_isolate.analysis_result_id=current_result.analysis_result_id
-                 AND current_isolate.microorganism_code=evidence.matched_microorganism_code
+                 AND current_isolate.microorganism_code IS NOT NULL
                  AND {relevant_current_isolate}
                 JOIN microb_sample_analysis AS prior_analysis
                   ON prior_analysis.sample_id=evidence.evidence_microb_sample_id
@@ -727,11 +738,11 @@ class PCRAnalyticsRepository:
                  AND prior_analysis.analysis_kind='BACTERIOLOGICAL'
                 JOIN microb_analysis_result AS prior_result
                   ON prior_result.sample_analysis_id=prior_analysis.sample_analysis_id
-                JOIN microb_isolate AS prior_isolate
+                LEFT JOIN microb_isolate AS prior_isolate
                   ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
-                 AND prior_isolate.microorganism_code=evidence.matched_microorganism_code
+                 AND prior_isolate.microorganism_code=current_isolate.microorganism_code
                  AND {relevant_prior_isolate}
-                JOIN microb_susceptibility_result AS susceptibility
+                LEFT JOIN microb_susceptibility_result AS susceptibility
                   ON susceptibility.isolate_id=prior_isolate.isolate_id
                  AND susceptibility.interpretation_code='P'
                  AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
@@ -769,22 +780,15 @@ class PCRAnalyticsRepository:
                       AND validation.validation_status='MATCH_ELIGIBLE'
                       AND COALESCE(gate.gate_status, 'NOT_APPLICABLE') <> 'LEGACY_SCREENING_BLOCKED'
                 ), retrospective_markers AS (
-                    SELECT evidence.pcr_sample_id, susceptibility.antibiotic_code AS marker_code
+                    SELECT DISTINCT evidence.pcr_sample_id, candidate.marker_code
                     FROM pcr_sil_retrospective_evidence AS evidence
-                    JOIN microb_sample_analysis AS prior_analysis
-                      ON prior_analysis.sample_id=evidence.evidence_microb_sample_id
-                     AND prior_analysis.analysis_code='PMDR'
-                     AND prior_analysis.analysis_kind='BACTERIOLOGICAL'
-                    JOIN microb_analysis_result AS prior_result
-                      ON prior_result.sample_analysis_id=prior_analysis.sample_analysis_id
-                    JOIN microb_isolate AS prior_isolate
-                      ON prior_isolate.analysis_result_id=prior_result.analysis_result_id
-                     AND prior_isolate.microorganism_code IS NOT NULL
-                     AND {relevant_prior_isolate}
-                    JOIN microb_susceptibility_result AS susceptibility
-                      ON susceptibility.isolate_id=prior_isolate.isolate_id
-                     AND susceptibility.interpretation_code='P'
-                     AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
+                    JOIN pcr_sil_link_candidate AS candidate
+                      ON candidate.derivation_id=evidence.derivation_id
+                     AND candidate.pcr_sample_id=evidence.pcr_sample_id
+                     AND candidate.current_microb_sample_id=evidence.current_microb_sample_id
+                     AND candidate.evidence_microb_sample_id=evidence.evidence_microb_sample_id
+                     AND candidate.candidate_kind='PRIOR'
+                     AND candidate.candidate_status='ACCEPTED'
                     WHERE evidence.derivation_id=:derivation_id
                       AND evidence.evidence_status='ACCEPTED'
                 ), resolved AS (

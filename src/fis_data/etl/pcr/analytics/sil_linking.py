@@ -14,7 +14,7 @@ CHARACTERIZATION_MARKERS = ("BLE", *CARBAPENEMASE_MARKERS)
 IRRELEVANT_MICROORGANISM_PATTERN = (
     r"Candida|Enterococcus|Stenotrophomonas|Acinetobacter"
 )
-POLICY_VERSION = "pcr-sil-linking-v2"
+POLICY_VERSION = "pcr-sil-linking-v3"
 
 
 def is_sil_relevant_microorganism(description: str | None) -> bool:

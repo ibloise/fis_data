@@ -4,6 +4,18 @@ Registro acumulativo de decisiones funcionales sobre la materialización,
 interpretación y presentación de resultados PCR. Cada nueva decisión debe
 añadirse como una entrada fechada, sin reescribir las anteriores.
 
+## 2026-10-17 — Herencia retrospectiva por organismo original
+
+La política `pcr-sil-linking-v3` conserva todos los aislados relevantes de la
+muestra original y busca una única muestra previa compatible con cualquiera
+de sus códigos, dentro de los límites configurados. Hereda los marcadores
+por coincidencia exacta de organismo para todos los aislados originales;
+los organismos ausentes quedan `0000` y no continúan su propia búsqueda.
+La conciliación global agrega solo esta herencia. Se excluyen los marcadores
+de organismos presentes exclusivamente en la muestra previa. Si no hay
+muestra previa seleccionada, se utiliza la evidencia directa por organismo.
+Los perfiles directos permanecen separados de los reconciliados.
+
 ## 2026-07-30 — Modelo y resultados vigentes
 
 Las vistas se gestionan junto al esquema de la base de datos. La salida

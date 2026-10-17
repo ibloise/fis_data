@@ -1709,35 +1709,24 @@ def create_views(engine: Engine) -> None:
                 WHERE metric.derivation_id=({current})
             ), retrospective_markers AS (
                 SELECT retrospective.pcr_sample_id,
-                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='OXA'), FALSE) AS oxa_detected,
-                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='KPC'), FALSE) AS kpc_detected,
-                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='NDM'), FALSE) AS ndm_detected,
-                       COALESCE(BOOL_OR(susceptibility.antibiotic_code='VIM'), FALSE) AS vim_detected,
+                       COALESCE(BOOL_OR(candidate.marker_code='OXA'), FALSE) AS oxa_detected,
+                       COALESCE(BOOL_OR(candidate.marker_code='KPC'), FALSE) AS kpc_detected,
+                       COALESCE(BOOL_OR(candidate.marker_code='NDM'), FALSE) AS ndm_detected,
+                       COALESCE(BOOL_OR(candidate.marker_code='VIM'), FALSE) AS vim_detected,
                        evidence.sample_number AS result_sample,
                        COALESCE(evidence.received_at, evidence.entered_at) AS result_entry_date
                 FROM pcr_sil_retrospective_evidence AS retrospective
                 JOIN microb_sample AS evidence
                   ON evidence.sample_id=retrospective.evidence_microb_sample_id
-                JOIN microb_sample_analysis AS analysis
-                  ON analysis.sample_id=evidence.sample_id
-                 AND analysis.analysis_code='PMDR'
-                 AND analysis.analysis_kind='BACTERIOLOGICAL'
-                JOIN microb_analysis_result AS analysis_result
-                  ON analysis_result.sample_analysis_id=analysis.sample_analysis_id
-                JOIN microb_isolate AS isolate
-                  ON isolate.analysis_result_id=analysis_result.analysis_result_id
-                 AND isolate.microorganism_code IS NOT NULL
-                JOIN microb_susceptibility_result AS susceptibility
-                  ON susceptibility.isolate_id=isolate.isolate_id
-                 AND susceptibility.interpretation_code='P'
-                 AND susceptibility.antibiotic_code IN ('OXA', 'KPC', 'NDM', 'VIM')
+                LEFT JOIN pcr_sil_link_candidate AS candidate
+                  ON candidate.derivation_id=retrospective.derivation_id
+                 AND candidate.pcr_sample_id=retrospective.pcr_sample_id
+                 AND candidate.current_microb_sample_id=retrospective.current_microb_sample_id
+                 AND candidate.evidence_microb_sample_id=retrospective.evidence_microb_sample_id
+                 AND candidate.candidate_kind='PRIOR'
+                 AND candidate.candidate_status='ACCEPTED'
                 WHERE retrospective.derivation_id=({current})
                   AND retrospective.evidence_status='ACCEPTED'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM ref_microb_catalog_entry AS ignored_organism
-                    WHERE ignored_organism.ref_microb_catalog_entry_id=isolate.microorganism_id
-                      AND ignored_organism.description ~* '{SIL_IRRELEVANT_MICROORGANISM_PATTERN}'
-                  )
                 GROUP BY retrospective.pcr_sample_id, evidence.sample_number,
                          evidence.received_at, evidence.entered_at
             ), resolved AS (
@@ -1836,17 +1825,38 @@ def create_views(engine: Engine) -> None:
         """,
         "v_downstream_sil_pcr_organism": f"""
             WITH resolved_organism AS (
-                SELECT candidate.pcr_sample_id, candidate.current_microb_sample_id,
-                       candidate.microorganism_code,
-                       COALESCE(BOOL_OR(candidate.marker_code='OXA'), FALSE) AS oxa_detected,
-                       COALESCE(BOOL_OR(candidate.marker_code='KPC'), FALSE) AS kpc_detected,
-                       COALESCE(BOOL_OR(candidate.marker_code='NDM'), FALSE) AS ndm_detected,
-                       COALESCE(BOOL_OR(candidate.marker_code='VIM'), FALSE) AS vim_detected
-                FROM pcr_sil_link_candidate AS candidate
-                WHERE candidate.derivation_id=({current})
-                  AND candidate.candidate_status='ACCEPTED'
-                GROUP BY candidate.pcr_sample_id, candidate.current_microb_sample_id,
-                         candidate.microorganism_code
+                SELECT organism.pcr_sample_id, organism.microb_sample_id AS current_microb_sample_id,
+                       organism.microorganism_code,
+                       CASE WHEN evidence.evidence_status='ACCEPTED'
+                            THEN COALESCE(BOOL_OR(candidate.marker_code='OXA'), FALSE)
+                            ELSE organism.oxa_detected END AS oxa_detected,
+                       CASE WHEN evidence.evidence_status='ACCEPTED'
+                            THEN COALESCE(BOOL_OR(candidate.marker_code='KPC'), FALSE)
+                            ELSE organism.kpc_detected END AS kpc_detected,
+                       CASE WHEN evidence.evidence_status='ACCEPTED'
+                            THEN COALESCE(BOOL_OR(candidate.marker_code='NDM'), FALSE)
+                            ELSE organism.ndm_detected END AS ndm_detected,
+                       CASE WHEN evidence.evidence_status='ACCEPTED'
+                            THEN COALESCE(BOOL_OR(candidate.marker_code='VIM'), FALSE)
+                            ELSE organism.vim_detected END AS vim_detected
+                FROM pcr_sil_organism_marker_summary AS organism
+                LEFT JOIN pcr_sil_retrospective_evidence AS evidence
+                  ON evidence.derivation_id=organism.derivation_id
+                 AND evidence.pcr_sample_id=organism.pcr_sample_id
+                 AND evidence.current_microb_sample_id=organism.microb_sample_id
+                LEFT JOIN pcr_sil_link_candidate AS candidate
+                  ON candidate.derivation_id=organism.derivation_id
+                 AND candidate.pcr_sample_id=organism.pcr_sample_id
+                 AND candidate.current_microb_sample_id=organism.microb_sample_id
+                 AND candidate.microorganism_code=organism.microorganism_code
+                 AND candidate.evidence_microb_sample_id=evidence.evidence_microb_sample_id
+                 AND candidate.candidate_kind='PRIOR'
+                 AND candidate.candidate_status='ACCEPTED'
+                WHERE organism.derivation_id=({current})
+                GROUP BY organism.pcr_sample_id, organism.microb_sample_id,
+                         organism.microorganism_code, evidence.evidence_status,
+                         organism.oxa_detected, organism.kpc_detected,
+                         organism.ndm_detected, organism.vim_detected
             )
             SELECT summary_global.*, organism.microorganism_code AS microorg_code,
                    microorganism.description AS microorg_name,

@@ -57,7 +57,10 @@ def test_sil_organism_view_keeps_samples_without_an_organism_summary() -> None:
     )
 
     assert "LEFT JOIN pcr_sil_organism_marker_summary AS organism" in statement
-    assert "WHERE organism.derivation_id" not in statement
+    # The inner reconciliation CTE filters its own derivation, while the
+    # outer LEFT JOIN must still preserve samples without an organism.
+    outer_select = statement.split("SELECT summary_global.*", 1)[1]
+    assert "WHERE organism.derivation_id" not in outer_select
     assert "COALESCE(organism.oxa_detected, FALSE)::int" in statement
 
 

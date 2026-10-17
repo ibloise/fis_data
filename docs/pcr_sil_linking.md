@@ -80,9 +80,11 @@ PCR directa.
 ## Búsqueda retrospectiva
 
 Se activa solo cuando la muestra SIL actual es `CULTURE_POSITIVE` y tiene al
-menos un aislado relevante sin caracterizar. La iteración conserva el conjunto
-de organismos actuales, pero la decisión es por cultivo: se selecciona como
-máximo una muestra previa. La búsqueda se limita a muestras anteriores que
+menos un aislado relevante sin caracterizar. Se conservan los identificadores
+de todos los aislados relevantes originales y sus códigos de organismo,
+incluidos los caracterizados. La decisión es por cultivo: se selecciona como
+máximo una muestra previa buscando cualquiera de esos códigos. La búsqueda
+se limita a muestras anteriores que
 cumplan todas estas condiciones:
 
 - Pertenecen al mismo paciente.
@@ -109,12 +111,43 @@ la iteración de todos ellos; no se buscan muestras distintas para *E. coli* y
 temporal, aparece un cultivo positivo sin ningún organismo actual o no hay
 muestra previa, la búsqueda termina sin herencia.
 
-La muestra previa seleccionada aporta un perfil binario con todos sus
-marcadores OXA/KPC/NDM/VIM relevantes. Ese perfil se usa para la conciliación
-PCR cuando existe; si no procede o no encuentra muestra previa, se usa el
-perfil binario directo del cultivo actual. BLEE sirve para impedir la búsqueda
-en el aislado actual, pero no sustituye por sí sola una evidencia de
-OXA/KPC/NDM/VIM para conciliar un target PCR.
+La política `pcr-sil-linking-v3` hereda los marcadores OXA/KPC/NDM/VIM
+por coincidencia exacta de código entre los aislados originales y los de la
+única muestra previa seleccionada. Se evalúan todos los organismos originales:
+si están presentes en la muestra previa, sus marcadores positivos se agregan
+mediante OR; si están ausentes o no tienen marcadores positivos, su perfil
+heredado es `0000`. No se continúa buscando otra muestra para completarlos.
+`matched_microorganism_code` conserva una coincidencia representativa de la
+selección; no limita la herencia a ese único código.
+
+El resultado global reconciliado y la conciliación PCR–SIL se calculan como
+OR de los marcadores heredados por los organismos originales. Los mecanismos
+de otros organismos presentes solo en la muestra previa quedan excluidos.
+Por ejemplo, para Klebsiella y E. coli actuales, una muestra previa con
+Klebsiella OXA y Enterobacter NDM produce Klebsiella `1000`, E. coli `0000`
+y global `1000` (orden OXA-48/VIM/KPC/NDM).
+
+Si no procede la búsqueda o no se encuentra muestra compatible, se utiliza
+la evidencia directa actual por organismo y su OR para el global. Cuando sí
+se selecciona muestra previa, la herencia determina el perfil reconciliado;
+los campos `direct_organism_*` conservan las observaciones actuales sin
+sobrescribirlas. BLEE impide que un aislado active por sí solo la búsqueda,
+pero no aporta evidencia OXA/KPC/NDM/VIM.
+
+Los perfiles son indicadores binarios de detección: un cero también puede
+significar ausencia de evidencia positiva, no necesariamente una prueba
+negativa explícita. El detalle de auditoría distingue organismos ausentes
+de organismos coincidentes sin marcadores positivos.
+
+Actualizar las vistas no regenera los candidatos de una derivación existente.
+Si se mantiene una derivación `v2`, pueden faltar candidatos de otros códigos
+compatibles de su muestra previa seleccionada. Para separar candidatos
+incompletos, vistas desactualizadas y diferencias de granularidad, se puede
+ejecutar manualmente
+[`diagnose_organism_attribution.sql`](../scripts/postgres/diagnose_organism_attribution.sql)
+antes de rederivar. Es una transacción de solo lectura que devuelve únicamente
+metadatos y recuentos agregados. Compara con las fuentes actuales, por lo que
+un cambio de fuentes desde la derivación también puede producir discrepancias.
 
 ## Persistencia y auditoría propuestas
 
@@ -123,8 +156,9 @@ La implementación deberá mantener candidatos y decisión final separados:
 - `pcr_sil_isolate_marker_summary`: evidencia directa por aislado.
 - `pcr_sil_retrospective_evidence`: única muestra previa elegida, o el motivo
   de no aplicar/no encontrar búsqueda.
-- `pcr_sil_link_candidate`: detalle de los marcadores del aislado coincidente
-  en esa muestra retrospectiva única.
+- `pcr_sil_link_candidate`: relaciones entre aislados originales y aislados
+  retrospectivos de igual código, con marcadores `ACCEPTED`. También conserva
+  registros `NO_EVIDENCE` para aislados originales sin herencia positiva.
 - `pcr_sil_result_link`: enlace por resultado PCR/target, con tipo
   `DIRECT`, `PRIOR_COMPATIBLE`, `NO_EVIDENCE`, `AMBIGUOUS` o `DISCORDANT`.
 
