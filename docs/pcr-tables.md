@@ -17,6 +17,11 @@ No se ha abierto ni consultado ninguna base SQLite ni ningún fichero de
 `data/`. Por tanto, este texto documenta el contrato implementado en el código,
 no el contenido ni el volumen real de una base desplegada.
 
+Las tablas persistentes de pseudónimos, las derivaciones de episodios
+longitudinales de pacientes y las vistas `v_downstream_*` se documentan por
+separado en [Modelo downstream, seudonimización y episodios](downstream-model.md).
+No forman parte del conteo de tablas y vistas `pcr_*` de este documento.
+
 Los identificadores SQL están definidos en minúsculas (`pcr_run`, por ejemplo).
 La referencia informal a tablas `PCR_` debe entenderse como este mismo
 namespace lógico.
@@ -481,7 +486,7 @@ Una fila Cq de Screening puede producir varias interpretaciones canónicas. Si
 falta la curva derivada, las dianas que la requieren producen `ERROR`.
 
 Para una diana específica, un Cq válido con pico de melting fuera de la ventana
-de la diana no se convierte en negativo: queda `INDETERMINATE` con
+de la diana se interpreta como `NEGATIVE`, conservando la traza
 `error = 'MELTING_INCOMPATIBLE'`. El Cq y el pico observado se preservan, y
 `metrics_json.compatible_targets_within_window` registra las dianas cuya
 temperatura esperada está dentro de la ventana configurada (actualmente ±0.5
@@ -743,7 +748,7 @@ diana inválida: `ALL_PROMOTED`, `PARTIAL`, `NONE_PROMOTED` o
 `NO_REAL_SAMPLES`. `promotion_coverage_json` incluye los recuentos de muestras
 reales, promocionadas y no promocionadas para esa diana y contexto.
 En Specific, `raw_delta_cq` se calcula con el Cq raw de 16S de la misma muestra
-y run con la fórmula `log10(2^(target_cq-reference_16s_cq))`. Es evidencia raw,
+y run con la fórmula `log10(2^-(target_cq-reference_16s_cq))`. Es evidencia raw,
 no una métrica promocionada: se exporta también el estado QC de la referencia y
 `raw_delta_cq_status` indica si falta Cq/16S o su QC no es válido.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import json
+import sqlite3
 import sys
 from collections.abc import Iterator
 from dataclasses import asdict
@@ -20,7 +21,7 @@ from .db import get_engine, get_db_settings
 from .etl.contracts import JobContext
 from .etl.control import RunStatus, ensure_source, finish_run, start_run
 from .etl.excel_parse_job import ExcelParseJob
-from .etl.exports import export_downstream, format_names
+from .etl.exports import downstream_schema, export_downstream, format_names
 from .etl.file_registry import register_file
 from .etl.ingest_excel import ingest_excel_file
 from .etl.ingest_text import ingest_text_file
@@ -31,10 +32,12 @@ from .etl.microb.normalization import MicrobNormalizer
 from .etl.microb.parse_job import MicrobParseJob
 from .etl.microb.staging_job import MicrobStagingJob
 from .etl.pcr.analytics import PCRAnalyticsJob
+from .etl.pcr.analytics.patient_episodes import PatientEpisodeJob
 from .etl.pcr.analytics.sil_linking import SILLinkingPolicy
+from .etl.pseudonymization import PseudonymizationRepository
 from .etl.pcr.replacement import PCRFileReplacement, supersede_pcr_files
 from .etl.pcr.review.cli import pcr_review
-from .schema import create_schema
+from .schema import create_schema, create_views
 from .schema import stg_microb_technique
 from .web import create_app
 
@@ -824,16 +827,164 @@ def derive_pcr(
 )
 @click.option(
     "--output", "output_path", type=click.Path(dir_okay=False, path_type=Path),
-    required=True, help="Destination XLSX file.",
+    required=True,
+    help="Destination XLSX file in data mode or JSON file in schema mode.",
+)
+@click.option(
+    "--mode", type=click.Choice(["data", "schema"]), default="data",
+    show_default=True,
+    help="Write worksheet data or print worksheet schema as JSON.",
+)
+@click.option(
+    "--verbose/--quiet", default=True, show_default=True,
+    help="Report export phases and row counts to stderr.",
 )
 def export_downstream_command(
-    db_path: str | None, format_name: str, output_path: Path
+    db_path: str | None,
+    format_name: str,
+    output_path: Path | None,
+    mode: str,
+    verbose: bool,
 ) -> None:
-    """Export one read-only downstream analytical frame to XLSX."""
+    """Export a downstream workbook or print its metadata-only schema."""
 
     engine = _engine_for_db_url(db_path)
-    counts = export_downstream(engine, format_name=format_name, output_path=output_path)
+    if mode == "schema":
+        schema_json = json.dumps(
+            downstream_schema(engine, format_name=format_name),
+            ensure_ascii=False,
+            indent=2,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(schema_json + "\n", encoding="utf-8")
+        click.echo(f"Export schema written to {output_path}")
+        return
+
+    on_progress = (lambda message: click.echo(message, err=True)) if verbose else None
+    counts = export_downstream(
+        engine,
+        format_name=format_name,
+        output_path=output_path,
+        on_progress=on_progress,
+    )
     click.echo(json.dumps({"format": format_name, "output": str(output_path), "rows": counts}, ensure_ascii=False, indent=2))
+
+
+@cli.command("pseudonymize")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+def pseudonymize(db_path: str | None) -> None:
+    """Assign persistent pseudonyms to normalized Microb identifiers."""
+
+    engine = _engine_for_db_url(db_path)
+    create_schema(engine)
+
+    last_percent: dict[str, int] = {}
+
+    def on_progress(entity: str, completed: int, total: int) -> None:
+        if total == 0:
+            return
+        percent = completed * 100 // total
+        if percent == last_percent.get(entity) and completed < total:
+            return
+        width = 24
+        filled = width * completed // total
+        bar = "=" * filled + " " * (width - filled)
+        click.echo(
+            f"\rAssigning {entity} pseudonyms [{bar}] {completed}/{total}",
+            nl=completed == total,
+            err=True,
+        )
+        last_percent[entity] = percent
+
+    counts = PseudonymizationRepository(engine).assign_normalized_microb(
+        on_progress=on_progress
+    )
+    click.echo(json.dumps(counts, ensure_ascii=False, indent=2))
+
+
+@cli.command("globalize-pseudonyms")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+@click.option("--reason", required=True, help="Audit reason for merging source-scoped mappings.")
+@click.option(
+    "--confirm-globalization",
+    required=True,
+    type=click.Choice(["GLOBALIZE-PSEUDONYMS"], case_sensitive=True),
+    help="Type GLOBALIZE-PSEUDONYMS to confirm merging duplicate mappings.",
+)
+def globalize_pseudonyms(
+    db_path: str | None, reason: str, confirm_globalization: str
+) -> None:
+    """Merge mappings so equal identifiers share one global pseudonym."""
+
+    del confirm_globalization
+    engine = _engine_for_db_url(db_path)
+    counts = PseudonymizationRepository(engine).globalize_registry_keys(
+        reason=reason
+    )
+    create_views(engine)
+    click.echo(json.dumps(counts, ensure_ascii=False, indent=2))
+
+
+@cli.command("import-pseudonyms")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+@click.option("--sqlite-path", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--source-name", required=True, help="Existing ctl_source scope for imported identifiers.")
+def import_pseudonyms(db_path: str | None, sqlite_path: Path, source_name: str) -> None:
+    """Import the legacy paper pseudonym registry without changing its SQLite file."""
+
+    sqlite_uri = f"{sqlite_path.resolve().as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(sqlite_uri, uri=True) as source:
+            source.row_factory = sqlite3.Row
+            patients = [dict(row) for row in source.execute(
+                "SELECT source_id, pseudonym FROM patients ORDER BY source_id"
+            )]
+            samples = [dict(row) for row in source.execute(
+                "SELECT source_id, patient_source_id, pseudonym FROM samples ORDER BY source_id"
+            )]
+    except sqlite3.Error as exc:
+        raise click.ClickException(f"Could not read the legacy registry: {exc}") from exc
+    engine = _engine_for_db_url(db_path)
+    create_schema(engine)
+    counts = PseudonymizationRepository(engine).import_legacy_registry(
+        source_name=source_name,
+        patients=patients,
+        samples=samples,
+    )
+    click.echo(json.dumps(counts, ensure_ascii=False, indent=2))
+
+
+@cli.command("destroy-pseudonyms")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+@click.option("--reason", required=True, help="Audit reason for deleting the persistent registry.")
+@click.option(
+    "--confirm-destruction", required=True,
+    type=click.Choice(["DESTROY-PSEUDONYMS"], case_sensitive=True),
+    help="Type DESTROY-PSEUDONYMS to confirm permanent registry destruction.",
+)
+def destroy_pseudonyms(db_path: str | None, reason: str, confirm_destruction: str) -> None:
+    """Explicitly destroy pseudonym mappings and retain a count-only audit event."""
+
+    del confirm_destruction
+    engine = _engine_for_db_url(db_path)
+    counts = PseudonymizationRepository(engine).destroy_registry(reason=reason)
+    click.echo(json.dumps(counts, ensure_ascii=False, indent=2))
+
+
+@cli.command("derive-patient-episodes")
+@click.option("--db-url", "db_path", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+@click.option("--max-gap-days", type=click.IntRange(min=0), default=30, show_default=True)
+@click.option("--algorithm-version", default="patient-gap-v1", show_default=True)
+def derive_patient_episodes(db_path: str | None, max_gap_days: int, algorithm_version: str) -> None:
+    """Derive audited longitudinal episodes from the current PCR--Microb matches."""
+
+    engine = _engine_for_db_url(db_path)
+    create_schema(engine)
+    result = PatientEpisodeJob(engine).run(
+        max_gap_days=max_gap_days,
+        algorithm_version=algorithm_version,
+    )
+    click.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @cli.command("materialize-microb")

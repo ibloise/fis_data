@@ -124,6 +124,23 @@ and records unknown catalog codes in `microb_normalization_issue`.
 `--rebuild` deletes the complete normalized Microb layer before loading it
 again; it never deletes staging records or reference catalogs.
 
+## Sequence Types (ST)
+
+Register and ingest ST workbooks as the `st` Excel entity, then parse and
+materialize them after Microb normalization:
+
+```bash
+fis-data ingest-excel --source-name ST --entity st path/to/st.xlsx
+fis-data parse-excel --entity st
+fis-data materialize --entity st
+```
+
+The materializer links by exact sample number and microorganism code. When
+multiple isolates in one sample share that code, it assigns the ST to all and
+audits the ambiguity. Raw source values remain available for audit and are
+omitted from final views. See [`docs/st-sequence-types.md`](docs/st-sequence-types.md)
+for the matching rules and audit statuses.
+
 ## Domain Materialization
 
 Materialize parsed PCR payloads into normalized domain tables:
@@ -175,21 +192,34 @@ Without a specific phase, a negative screening is negative; a positive
 screening is also retained as negative but carries the warning
 `SCREENING_POSITIVE_WITHOUT_SPECIFIC_PHASE`. Per-target Cq normalization is in
 `v_pcr_sample_target_metric`, where `delta_cq` is
-`log10(2^(target_cq - reference_16s_cq))` for the same run and sample.
+`log10(2^-(target_cq - reference_16s_cq))` for the same run and sample.
 
 ## Downstream exports
 
-Downstream layouts are registered as independent export frames. The initial
-`analytical-core-tables` frame provides two downstream-ready crossing sheets:
+The `analytical-core-tables` and `paper-analysis` format names write the same
+complete workbook. It preserves the original core sheets and adds the newer
+downstream analyses and episode sheets. The workbook includes two crossing
+sheets:
 `SIL PCR global` (one row per sample number) and `SIL PCR organisms` (one row
 per relevant microorganism, or one row with empty organism fields when the SIL
-culture is negative or not processed), together with supporting core tables. The `Report` sheet
-records export time, derivation identity, and the versioned melting and
-PCR--SIL linking policies:
+culture is negative or not processed). That organism sheet also exports `st`,
+with distinct sequence types aggregated per sample and microorganism; conflicts
+remain null for review in the ST audit tables. The workbook includes supporting
+core tables. The `Report` sheet records export time, derivation identity, and
+the versioned melting and PCR--SIL linking policies:
 
 ```bash
 fis-data export-downstream --format analytical-core-tables \
   --output analytical_core_tables.xlsx
+```
+
+Write the selected workbook schema as JSON without fetching data rows. The file
+includes worksheet names, column names, and the source query so scripts can be
+adapted from metadata alone:
+
+```bash
+fis-data export-downstream --format paper-analysis --mode schema \
+  --output paper_analysis_schema.json
 ```
 
 The primary SIL marker columns in those two crossing sheets are the reconciled
@@ -197,8 +227,94 @@ comparison result: direct evidence when present, or compatible inherited
 evidence when the policy permits it. Direct current-culture profiles remain as
 `direct_*` support columns for traceability.
 
+In `SIL PCR global`, the canonical, per-carbapenemase FIS result is exposed as
+`fis_oxa48`, `fis_vim`, `fis_kpc`, and `fis_ndm`. These are the components of
+`encode_fis`, in OXA48--VIM--KPC--NDM order; Screening and Specific phase
+columns remain source-specific support fields. The corresponding global
+`*_log_delta` values are exported only when that canonical FIS marker is
+positive; raw target metrics remain available in `PCR target metrics`.
+
 Additional downstream layouts can be added without changing this command or
 the shared workbook writer.
+
+Build a persistent pseudonym registry after `derive-pcr`. The command uses only
+Microb patient and sample identifiers attached to the current successful PCR
+derivation's integrated results, with `MATCH_ELIGIBLE` PCR–Microb links, and
+excludes samples blocked by the screening gate. It does not pseudonymize all
+normalized Microb records. Each included NHC and sample number receives one
+pseudonym globally, even when it appears in more than one source. If the
+database has the earlier source-scoped registry, globalize it first; import a
+legacy paper registry before assigning new pseudonyms. PCR/Microb rebuilds do
+not clear the registry:
+
+```bash
+fis-data pseudonymize
+```
+
+The command shows separate progress bars for newly registered patients and
+samples. It displays counts only, never the source identifiers.
+
+Migrate an existing registry created with source-scoped keys. The operation
+keeps the oldest pseudonym for each repeated identifier, removes duplicate
+source mappings, preserves counters, and records an audit event. It requires
+an explicit reason and confirmation:
+
+```bash
+fis-data globalize-pseudonyms \
+  --reason "Unificar identificadores compartidos entre fuentes" \
+  --confirm-globalization GLOBALIZE-PSEUDONYMS
+```
+
+Import the registry used by an existing paper workflow without modifying its
+SQLite file. Supply the matching FIS Data `source_name`:
+
+```bash
+fis-data import-pseudonyms --sqlite-path path/to/pseudonyms.sqlite \
+  --source-name MICROBIOLOGY
+```
+
+The complete workbook contains these original core sheets:
+`SIL PCR global`, `SIL PCR organisms`, `PCR samples support`, `PCR target
+metrics`, `Culture global support`, `Culture organisms support`, `Culture
+isolates support`, and `PCR SIL links`. It adds `PCR SIL targets`,
+`SIL organism targets`, `SIL organism profiles`, `PCR SIL sample profiles`,
+`Patient episodes`, and `Episode samples`.
+
+The crossing sheets retain their existing columns, including legacy identifiers;
+the support sheets also retain their existing fields. The added analysis sheets
+provide pseudonymized identifiers. Export fails if a matched sample or patient
+in the current derivation has no registered pseudonym:
+
+```bash
+fis-data export-downstream --format paper-analysis \
+  --output paper_analysis.xlsx
+```
+
+Build the audited longitudinal patient episodes from the current successful
+PCR derivation. The default maximum gap between consecutive samples is 30
+calendar days; a gap equal to the limit stays within the same episode:
+
+```bash
+fis-data derive-patient-episodes --max-gap-days 30 \
+  --algorithm-version patient-gap-v1
+```
+
+These are patient episodes, distinct from PCR run association episodes. The
+parameters and source PCR derivation are recorded for each episode build.
+Destroying the persistent pseudonym registry requires the dedicated command
+and its explicit confirmation token; the count-only audit record is retained:
+
+```bash
+fis-data destroy-pseudonyms --reason "Approved registry reset" \
+  --confirm-destruction DESTROY-PSEUDONYMS
+```
+
+Destruction also removes the assignment counters. If pseudonymization is run
+again afterwards, numbering restarts and previous pseudonyms may be reused.
+Coordinate this explicit reset with consumers of earlier exports. The
+[downstream model guide](docs/downstream-model.md) documents registry
+semantics, migration, episode eligibility, view granularity, and export
+contents.
 
 Use the QC-incidence layout to investigate invalid or partially invalid runs:
 

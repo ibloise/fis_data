@@ -64,6 +64,96 @@ def test_sil_organism_view_keeps_samples_without_an_organism_summary() -> None:
     assert "COALESCE(organism.oxa_detected, FALSE)::int" in statement
 
 
+def test_sil_pcr_global_exposes_canonical_fis_markers() -> None:
+    class CapturingConnection:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement) -> None:
+            self.statements.append(str(statement))
+
+    class CapturingTransaction:
+        def __init__(self, connection: CapturingConnection) -> None:
+            self.connection = connection
+
+        def __enter__(self) -> CapturingConnection:
+            return self.connection
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+    class CapturingEngine:
+        dialect = type("Dialect", (), {"name": "postgresql"})()
+
+        def __init__(self, connection: CapturingConnection) -> None:
+            self.connection = connection
+
+        def begin(self) -> CapturingTransaction:
+            return CapturingTransaction(self.connection)
+
+    connection = CapturingConnection()
+    create_views(CapturingEngine(connection))
+    statement = next(
+        sql for sql in connection.statements
+        if sql.startswith("CREATE VIEW v_downstream_sil_pcr_global")
+    )
+
+    for marker in ("fis_oxa48", "fis_vim", "fis_kpc", "fis_ndm"):
+        assert f"AS {marker}" in statement
+    assert "COALESCE(oxa48_specific, 0) AS oxa48" in statement
+    assert "CASE WHEN -1 IN (fis.oxa48, fis.vim, fis.kpc, fis.ndm)" in statement
+    assert "CASE WHEN fis.vim=1 THEN vim_metric.delta_cq END AS vim_log_delta" in statement
+    assert "CASE WHEN fis.ndm=1 THEN ndm_metric.delta_cq END AS ndm_log_delta" in statement
+    assert "CASE WHEN fis.oxa48=1 THEN oxa_metric.delta_cq END AS oxa48_log_delta" in statement
+    assert "CASE WHEN fis.kpc=1 THEN kpc_metric.delta_cq END AS kpc_log_delta" in statement
+
+
+def test_paper_views_use_pseudonyms_and_microorganism_level_evidence() -> None:
+    class CapturingConnection:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement) -> None:
+            self.statements.append(str(statement))
+
+    class CapturingTransaction:
+        def __init__(self, connection: CapturingConnection) -> None:
+            self.connection = connection
+
+        def __enter__(self) -> CapturingConnection:
+            return self.connection
+
+        def __exit__(self, *_: object) -> bool:
+            return False
+
+    class CapturingEngine:
+        dialect = type("Dialect", (), {"name": "postgresql"})()
+
+        def __init__(self, connection: CapturingConnection) -> None:
+            self.connection = connection
+
+        def begin(self) -> CapturingTransaction:
+            return CapturingTransaction(self.connection)
+
+    connection = CapturingConnection()
+    create_views(CapturingEngine(connection))
+    target = next(sql for sql in connection.statements if sql.startswith("CREATE VIEW v_downstream_pcr_sil_target"))
+    organism = next(sql for sql in connection.statements if sql.startswith("CREATE VIEW v_downstream_sil_organism_target"))
+    for statement in (target, organism):
+        assert "sample_pseudonym" in statement
+        assert "patient_pseudonym" in statement
+        assert "patient.nhc" not in statement
+        assert "sample.sample_number" not in statement
+    assert "organism.organism_oxa48" in organism
+    assert "organism.direct_organism_oxa48" in organism
+    assert "CROSS JOIN LATERAL (VALUES" in target
+    assert "summary.specific_status" in target
+    assert "summary.result_itself" in target
+    assert "global." not in target
+    assert "link.canonical_target=target.canonical_target" in target
+    assert any(sql.startswith("CREATE VIEW v_downstream_patient_episode_sample") for sql in connection.statements)
+
+
 def test_pcr_qc_error_export_contains_unpromoted_samples_and_other_context(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'qc-errors.sqlite'}", future=True)
     create_schema(engine)
@@ -295,7 +385,7 @@ def test_pcr_qc_error_export_contains_unpromoted_samples_and_other_context(tmp_p
     assert raw_rows[1][raw_rows[0].index("raw_peak_temperature")] == 88.1
     assert raw_rows[1][raw_rows[0].index("raw_reference_16s_cq")] == 20
     assert raw_rows[1][raw_rows[0].index("raw_delta_cq")] == pytest.approx(
-        log10(2**11.2)
+        log10(2**-11.2)
     )
     assert raw_rows[1][raw_rows[0].index("raw_delta_cq_status")] == (
         "RAW_REFERENCE_16S_QC_INVALID"

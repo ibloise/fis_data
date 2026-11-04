@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from .materialization import EntityMaterializer
 from .pcr.materializer import PCR_MATERIALIZER
+from .st.materializer import ST_MATERIALIZER
 
 ENTITY_MATERIALIZERS: dict[str, EntityMaterializer] = {
     PCR_MATERIALIZER.entity_name: PCR_MATERIALIZER,
+    ST_MATERIALIZER.entity_name: ST_MATERIALIZER,
 }
 
 

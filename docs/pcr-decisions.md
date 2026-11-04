@@ -38,11 +38,12 @@ En Screening los controles son globales: basta un control positivo positivo y
 todos los controles negativos deben ser negativos. En ensayos específicos el
 QC sigue evaluándose por diana.
 
-## 2026-07-30 — Cq y melting incompatibles
+## 2026-09-02 — Cq y melting incompatibles
 
-Un Cq válido no se descarta por un melting incompatible. Se conserva con
-llamada `INDETERMINATE`, error `MELTING_INCOMPATIBLE`, el pico observado y la
-diana compatible más cercana dentro de ±5 °C, cuando exista.
+Para una diana específica, un Cq válido con un pico de melting incompatible se
+interpreta como `NEGATIVE`. Se conserva la traza `MELTING_INCOMPATIBLE`, el
+pico observado y la diana compatible dentro de la ventana configurada, cuando
+exista.
 
 ## 2026-07-30 — Un target `FAIL` no invalida el run completo
 

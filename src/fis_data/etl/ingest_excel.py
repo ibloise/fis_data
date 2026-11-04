@@ -60,7 +60,7 @@ def ingest_excel_file(
 
     insert_stmt = insert(raw_excel_rows).on_conflict_do_nothing(
         index_elements=["file_id", "sheet_name", "row_no"]
-    )
+    ).returning(raw_excel_rows.c.row_id)
 
     try:
         with engine.begin() as conn:
@@ -94,12 +94,12 @@ def ingest_excel_file(
 
                     if len(rows) >= batch_size:
                         result = conn.execute(insert_stmt, rows)
-                        inserted += result.rowcount or 0
+                        inserted += len(result.fetchall())
                         rows.clear()
 
             if rows:
                 result = conn.execute(insert_stmt, rows)
-                inserted += result.rowcount or 0
+                inserted += len(result.fetchall())
     finally:
         workbook.close()
 

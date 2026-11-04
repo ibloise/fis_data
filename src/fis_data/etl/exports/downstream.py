@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Callable, Final
 
 from openpyxl import Workbook
 from sqlalchemy import text
@@ -35,10 +35,7 @@ class ExportFormat:
     sheets: tuple[ExportSheet, ...]
 
 
-ANALYTICAL_CORE_TABLES: Final = ExportFormat(
-    name="analytical-core-tables",
-    description="Normalized PCR, culture, organism, metric, and link evidence tables.",
-    sheets=(
+_CORE_SHEETS: Final = (
         ExportSheet(
             "SIL PCR global",
             "SELECT * FROM v_downstream_sil_pcr_global ORDER BY sample",
@@ -73,7 +70,63 @@ ANALYTICAL_CORE_TABLES: Final = ExportFormat(
             "SELECT * FROM v_pcr_sil_result_link "
             "ORDER BY sample_key, run_type, canonical_target",
         ),
+    )
+
+_PAPER_ANALYSIS_SHEETS: Final = (
+        ExportSheet(
+            "PCR SIL targets",
+            "SELECT * FROM v_downstream_pcr_sil_target "
+            "ORDER BY sample_pseudonym, canonical_target",
+        ),
+        ExportSheet(
+            "SIL organism targets",
+            "SELECT * FROM v_downstream_sil_organism_target "
+            "ORDER BY sample_pseudonym, microorg_code, canonical_target",
+        ),
+        ExportSheet(
+            "SIL organism profiles",
+            "SELECT * FROM v_downstream_sil_organism_profile "
+            "ORDER BY sample_pseudonym, microorg_code",
+        ),
+        ExportSheet(
+            "PCR SIL sample profiles",
+            "SELECT * FROM v_downstream_pcr_sil_sample_profile "
+            "ORDER BY sample_pseudonym",
+        ),
+        ExportSheet(
+            "Patient episodes",
+            "SELECT algorithm_version, parameters_json, patient_pseudonym, "
+            "episode_number, started_at, ended_at, sample_count, start_reason "
+            "FROM v_downstream_patient_episode "
+            "ORDER BY patient_pseudonym, episode_number",
+        ),
+        ExportSheet(
+            "Episode samples",
+            "SELECT pcr_derivation_id, patient_pseudonym, sample_pseudonym, "
+            "episode_number, clinical_date, days_since_previous "
+            "FROM v_downstream_patient_episode_sample "
+            "ORDER BY patient_pseudonym, episode_number, clinical_date, sample_pseudonym",
+        ),
+    )
+
+_COMPLETE_ANALYSIS_SHEETS: Final = _CORE_SHEETS + _PAPER_ANALYSIS_SHEETS
+
+ANALYTICAL_CORE_TABLES: Final = ExportFormat(
+    name="analytical-core-tables",
+    description=(
+        "Complete analytical workbook: original core evidence plus downstream "
+        "targets, profiles, and patient episodes."
     ),
+    sheets=_COMPLETE_ANALYSIS_SHEETS,
+)
+
+PAPER_ANALYSIS: Final = ExportFormat(
+    name="paper-analysis",
+    description=(
+        "Complete analytical workbook: original core evidence plus downstream "
+        "targets, profiles, and patient episodes."
+    ),
+    sheets=_COMPLETE_ANALYSIS_SHEETS,
 )
 
 
@@ -268,7 +321,7 @@ PCR_QC_ERRORS: Final = ExportFormat(
                        WHEN failed.semantic_type='specific'
                         AND interpretation.cq IS NOT NULL
                         AND reference.cq IS NOT NULL
-                           THEN (interpretation.cq-reference.cq) * LOG(2.0)
+                           THEN -(interpretation.cq-reference.cq) * LOG(2.0)
                    END AS raw_delta_cq,
                    CASE
                        WHEN failed.semantic_type <> 'specific' THEN 'NOT_APPLICABLE'
@@ -387,6 +440,7 @@ PCR_QC_ERRORS: Final = ExportFormat(
 
 FORMATS: Final = {
     ANALYTICAL_CORE_TABLES.name: ANALYTICAL_CORE_TABLES,
+    PAPER_ANALYSIS.name: PAPER_ANALYSIS,
     PCR_QC_ERRORS.name: PCR_QC_ERRORS,
 }
 
@@ -397,7 +451,45 @@ def format_names() -> tuple[str, ...]:
     return tuple(FORMATS)
 
 
-def export_downstream(engine: Engine, *, format_name: str, output_path: Path) -> dict[str, int]:
+def downstream_schema(engine: Engine, *, format_name: str) -> dict[str, object]:
+    """Describe export worksheet columns without fetching any data rows."""
+
+    try:
+        export_format = FORMATS[format_name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown downstream export format: {format_name}") from exc
+
+    sheets = [{
+        "name": "Report",
+        "columns": ["field", "value"],
+        "query": None,
+    }]
+    with engine.connect() as conn:
+        for definition in export_format.sheets:
+            result = conn.execute(text(
+                f"SELECT * FROM ({definition.query}) AS export_schema LIMIT 0"
+            ))
+            sheets.append({
+                "name": definition.name,
+                "columns": list(result.keys()),
+                "query": definition.query.strip(),
+            })
+
+    return {
+        "format": format_name,
+        "metadata_only": True,
+        "data_rows_read": False,
+        "sheets": sheets,
+    }
+
+
+def export_downstream(
+    engine: Engine,
+    *,
+    format_name: str,
+    output_path: Path,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, int]:
     """Write one registered export frame to an XLSX workbook.
 
     Callers must prepare the managed schema/views first; this function only
@@ -409,22 +501,82 @@ def export_downstream(engine: Engine, *, format_name: str, output_path: Path) ->
     except KeyError as exc:
         raise ValueError(f"Unknown downstream export format: {format_name}") from exc
 
+    def report(message: str) -> None:
+        if on_progress is not None:
+            on_progress(message)
+
+    report(
+        f"Starting {format_name} export to {output_path} "
+        f"({len(export_format.sheets)} data sheets)."
+    )
     workbook = Workbook(write_only=True)
     counts: dict[str, int] = {}
+    report("Connecting to the database.")
     with engine.connect() as conn:
+        if format_name in {PAPER_ANALYSIS.name, ANALYTICAL_CORE_TABLES.name}:
+            report("Checking pseudonym coverage on validated matched samples.")
+            has_missing = conn.execute(text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pcr_microb_well_validation AS validation
+                    JOIN pcr_sample_result AS result
+                      ON result.derivation_id=validation.derivation_id
+                     AND result.pcr_sample_id=validation.pcr_sample_id
+                    LEFT JOIN pcr_sample_scope_gate AS gate
+                      ON gate.derivation_id=validation.derivation_id
+                     AND gate.pcr_sample_id=validation.pcr_sample_id
+                    JOIN microb_sample AS sample
+                      ON sample.sample_id=validation.microb_sample_id
+                    LEFT JOIN microb_patient AS patient
+                      ON patient.patient_id=sample.patient_id
+                    LEFT JOIN pseudonym_sample_registry AS sample_map
+                      ON sample_map.source_identifier=sample.sample_number
+                    LEFT JOIN pseudonym_patient_registry AS patient_map
+                      ON patient_map.source_identifier=patient.nhc
+                    WHERE validation.derivation_id=(
+                        SELECT derivation_id FROM pcr_derivation_run
+                        WHERE status='SUCCESS' AND is_current=TRUE
+                    )
+                      AND validation.validation_status='MATCH_ELIGIBLE'
+                      AND COALESCE(gate.gate_status, 'NOT_APPLICABLE')
+                          <> 'LEGACY_SCREENING_BLOCKED'
+                      AND (sample_map.registry_id IS NULL
+                           OR patient_map.registry_id IS NULL)
+                )
+                """
+            )).scalar_one()
+            if has_missing:
+                raise ValueError(
+                    "Cannot export paper-analysis: one or more validated matched "
+                    "samples or patients have no registered pseudonym. Run "
+                    "fis-data pseudonymize first."
+                )
+            report("Pseudonym coverage check complete; all matched IDs are mapped.")
+        report("Writing report metadata.")
         _write_report_sheet(workbook, conn, export_format)
         for definition in export_format.sheets:
+            report(f"Executing query for sheet '{definition.name}'.")
             worksheet = workbook.create_sheet(title=definition.name)
             result = conn.execute(text(definition.query))
             headers = list(result.keys())
             worksheet.append(headers)
+            report(
+                f"Query opened for '{definition.name}' "
+                f"({len(headers)} columns); streaming rows."
+            )
             count = 0
             for row in result:
                 worksheet.append([_xlsx_value(value) for value in row])
                 count += 1
+                if count % 10000 == 0:
+                    report(f"Sheet '{definition.name}': {count:,} rows written.")
             counts[definition.name] = count
+            report(f"Finished sheet '{definition.name}': {count:,} rows.")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    report("Saving XLSX workbook; this can take a while for large exports.")
     workbook.save(output_path)
+    report("XLSX workbook saved.")
     return counts
 
 
@@ -470,3 +622,16 @@ def _write_report_sheet(workbook: Workbook, conn, export_format: ExportFormat) -
     worksheet.append(["pcr_sil_linking_policy", json.dumps(
         parameters.get("pcr_sil_linking", {}), ensure_ascii=False, sort_keys=True,
     )])
+    episode = conn.execute(text(
+        "SELECT episode_derivation_id, algorithm_version, parameters_json, "
+        "started_at, finished_at FROM patient_episode_derivation "
+        "WHERE status='SUCCESS' AND is_current=TRUE"
+    )).mappings().one_or_none()
+    if episode is not None:
+        worksheet.append(["patient_episode_derivation_id", episode["episode_derivation_id"]])
+        worksheet.append(["patient_episode_algorithm_version", episode["algorithm_version"]])
+        worksheet.append(["patient_episode_parameters", json.dumps(
+            loads_json(episode["parameters_json"]), ensure_ascii=False, sort_keys=True,
+        )])
+        worksheet.append(["patient_episode_started_at", episode["started_at"]])
+        worksheet.append(["patient_episode_finished_at", episode["finished_at"]])

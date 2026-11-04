@@ -939,9 +939,9 @@ class PCRAnalyticsRepository:
                        target.canonical_target, target.interpretation_id, target.target_cq,
                        reference.cq,
                        CASE WHEN target.target_cq IS NOT NULL AND reference.cq IS NOT NULL
-                            THEN (target.target_cq-reference.cq) * LOG(2.0) END,
+                            THEN -(target.target_cq-reference.cq) * LOG(2.0) END,
                        jsonb_build_object(
-                         'formula', 'log10(2^(target_cq-reference_16s_cq))',
+                         'formula', 'log10(2^-(target_cq-reference_16s_cq))',
                          'reference_found', reference.cq IS NOT NULL
                        )
                 FROM promoted_target AS target
@@ -1579,6 +1579,9 @@ def _clear_derived_model(conn: Connection) -> None:
     """Delete rebuildable tables using an existing transaction."""
 
     tables = (
+        "patient_episode_sample",
+        "patient_episode",
+        "patient_episode_derivation",
         "pcr_sample_target_metric",
         "pcr_sample_result",
         "pcr_sample_scope_gate",

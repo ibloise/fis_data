@@ -46,6 +46,12 @@ MANAGED_VIEW_NAMES = (
     "v_pcr_sil_result_link",
     "v_downstream_sil_pcr_global",
     "v_downstream_sil_pcr_organism",
+    "v_downstream_pcr_sil_target",
+    "v_downstream_sil_organism_target",
+    "v_downstream_sil_organism_profile",
+    "v_downstream_pcr_sil_sample_profile",
+    "v_downstream_patient_episode",
+    "v_downstream_patient_episode_sample",
     "v_pcr_run_qc",
     "v_pcr_target_qc_evidence",
     "v_pcr_episodes",
@@ -355,6 +361,34 @@ microb_isolate = Table(
     UniqueConstraint("analysis_result_id", "isolate_number", name="uq_microb_isolate_result_number"),
 )
 
+stg_st_record = Table(
+    "stg_st_record",
+    metadata,
+    Column("st_record_id", Integer, primary_key=True, autoincrement=True),
+    Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
+    Column("run_id", Integer, ForeignKey("ctl_etl_run.run_id"), nullable=False),
+    Column("file_id", Integer, ForeignKey("ctl_file_registry.file_id"), nullable=False),
+    Column("raw_excel_row_id", Integer, ForeignKey("raw_excel_rows.row_id"), nullable=False, unique=True),
+    Column("sample_number", String(64), nullable=False),
+    Column("microorganism_code", String(32), nullable=False),
+    Column("microorganism_name", String(255)),
+    Column("microorganism_name_raw", Text),
+    Column("st_value", String(64), nullable=False),
+    Column("st_raw", Text),
+    Column("match_status", String(40), nullable=False),
+    Column("matched_sample_count", Integer, nullable=False, server_default=text("0")),
+    Column("matched_isolate_count", Integer, nullable=False, server_default=text("0")),
+    Column("details_json", JSONDocument(), nullable=False),
+    Column("loaded_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+microb_isolate_st_link = Table(
+    "microb_isolate_st_link",
+    metadata,
+    Column("st_record_id", Integer, ForeignKey("stg_st_record.st_record_id"), primary_key=True),
+    Column("isolate_id", Integer, ForeignKey("microb_isolate.isolate_id"), primary_key=True),
+)
+
 microb_sample_observation = Table(
     "microb_sample_observation", metadata,
     Column("sample_observation_id", Integer, primary_key=True, autoincrement=True),
@@ -410,6 +444,48 @@ microb_normalization_issue = Table(
     Column("field_name", String(100), nullable=False), Column("code", String(100)),
     Column("severity", String(20), nullable=False), Column("message", Text, nullable=False),
     UniqueConstraint("staging_table", "staging_id", "field_name", "code", name="uq_microb_micro_issue"),
+)
+
+# Persistent pseudonym registries deliberately use natural source identifiers,
+# not normalized Microb surrogate IDs that can change during a rebuild.
+pseudonym_patient_registry = Table(
+    "pseudonym_patient_registry",
+    metadata,
+    Column("registry_id", Integer, primary_key=True, autoincrement=True),
+    Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
+    Column("source_identifier", String(64), nullable=False),
+    Column("pseudonym", String(32), nullable=False, unique=True),
+    Column("assigned_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("source_identifier", name="uq_pseudonym_patient_identifier"),
+)
+
+pseudonym_sample_registry = Table(
+    "pseudonym_sample_registry",
+    metadata,
+    Column("registry_id", Integer, primary_key=True, autoincrement=True),
+    Column("source_id", Integer, ForeignKey("ctl_source.source_id"), nullable=False),
+    Column("source_identifier", String(64), nullable=False),
+    Column("pseudonym", String(32), nullable=False, unique=True),
+    Column("assigned_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    UniqueConstraint("source_identifier", name="uq_pseudonym_sample_identifier"),
+)
+
+pseudonymization_counter = Table(
+    "pseudonymization_counter",
+    metadata,
+    Column("entity_type", String(16), primary_key=True),
+    Column("last_number", Integer, nullable=False, server_default=text("0")),
+)
+
+pseudonymization_audit = Table(
+    "pseudonymization_audit",
+    metadata,
+    Column("audit_id", Integer, primary_key=True, autoincrement=True),
+    Column("action", String(32), nullable=False),
+    Column("patient_count", Integer, nullable=False, server_default=text("0")),
+    Column("sample_count", Integer, nullable=False, server_default=text("0")),
+    Column("reason", Text),
+    Column("created_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
 microb_entity_lineage = Table(
@@ -897,6 +973,49 @@ pcr_episode_run = Table(
     Column("association_status", String(30), nullable=False),
 )
 
+patient_episode_derivation = Table(
+    "patient_episode_derivation",
+    metadata,
+    Column("episode_derivation_id", Integer, primary_key=True, autoincrement=True),
+    Column("pcr_derivation_id", Integer, ForeignKey("pcr_derivation_run.derivation_id"), nullable=False),
+    Column("algorithm_version", String(64), nullable=False),
+    Column("parameters_json", JSONDocument(), nullable=False),
+    Column("status", String(20), nullable=False, server_default=text("'RUNNING'")),
+    Column("is_current", Boolean, nullable=False, server_default=text("false")),
+    Column("started_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("finished_at", DateTime),
+    Column("sample_count", Integer, nullable=False, server_default=text("0")),
+    Column("episode_count", Integer, nullable=False, server_default=text("0")),
+    Column("details_json", JSONDocument(), nullable=False),
+)
+
+patient_episode = Table(
+    "patient_episode",
+    metadata,
+    Column("patient_episode_id", Integer, primary_key=True, autoincrement=True),
+    Column("episode_derivation_id", Integer, ForeignKey("patient_episode_derivation.episode_derivation_id"), nullable=False),
+    Column("patient_id", Integer, ForeignKey("microb_patient.patient_id"), nullable=False),
+    Column("episode_number", Integer, nullable=False),
+    Column("started_at", DateTime, nullable=False),
+    Column("ended_at", DateTime, nullable=False),
+    Column("sample_count", Integer, nullable=False),
+    Column("start_reason", String(32), nullable=False),
+    UniqueConstraint("episode_derivation_id", "patient_id", "episode_number", name="uq_patient_episode_number"),
+)
+
+patient_episode_sample = Table(
+    "patient_episode_sample",
+    metadata,
+    Column("episode_derivation_id", Integer, ForeignKey("patient_episode_derivation.episode_derivation_id"), primary_key=True),
+    Column("patient_episode_id", Integer, ForeignKey("patient_episode.patient_episode_id"), nullable=False),
+    Column("pcr_sample_id", Integer, ForeignKey("pcr_sample.pcr_sample_id"), primary_key=True),
+    Column("microb_sample_id", Integer, ForeignKey("microb_sample.sample_id"), nullable=False),
+    Column("clinical_date", DateTime, nullable=False),
+    Column("days_since_previous", Integer),
+    UniqueConstraint("episode_derivation_id", "pcr_sample_id", name="uq_patient_episode_sample_pcr"),
+    UniqueConstraint("episode_derivation_id", "microb_sample_id", name="uq_patient_episode_sample_microb"),
+)
+
 pcr_result_selection = Table(
     "pcr_result_selection",
     metadata,
@@ -1122,6 +1241,8 @@ Index("idx_pcr_sample_scope_gate_status", pcr_sample_scope_gate.c.derivation_id,
 Index("idx_microb_sample_patient_dates", microb_sample.c.patient_id, microb_sample.c.received_at, microb_sample.c.entered_at)
 Index("idx_microb_analysis_pmdr", microb_sample_analysis.c.sample_id, microb_sample_analysis.c.analysis_code, microb_sample_analysis.c.analysis_kind)
 Index("idx_microb_isolate_result_organism", microb_isolate.c.analysis_result_id, microb_isolate.c.microorganism_code)
+Index("idx_stg_st_sample_code", stg_st_record.c.sample_number, stg_st_record.c.microorganism_code)
+Index("idx_microb_isolate_st_isolate", microb_isolate_st_link.c.isolate_id)
 Index("idx_microb_susceptibility_marker", microb_susceptibility_result.c.isolate_id, microb_susceptibility_result.c.antibiotic_code, microb_susceptibility_result.c.interpretation_code)
 Index("idx_pcr_sil_classification_derivation", pcr_sil_culture_classification.c.derivation_id, pcr_sil_culture_classification.c.culture_category)
 Index("idx_pcr_sil_candidate_sample", pcr_sil_link_candidate.c.derivation_id, pcr_sil_link_candidate.c.pcr_sample_id, pcr_sil_link_candidate.c.marker_code)
@@ -1131,6 +1252,7 @@ Index("idx_pcr_sil_organism_marker", pcr_sil_organism_marker_summary.c.derivatio
 Index("idx_pcr_sil_culture_marker", pcr_sil_culture_marker_summary.c.derivation_id, pcr_sil_culture_marker_summary.c.microb_sample_id)
 Index("idx_pcr_sample_result_category", pcr_sample_result.c.derivation_id, pcr_sample_result.c.pcr_category)
 Index("idx_pcr_sample_metric_target", pcr_sample_target_metric.c.derivation_id, pcr_sample_target_metric.c.canonical_target)
+Index("idx_patient_episode_derivation_current", patient_episode_derivation.c.is_current)
 Index(
     "idx_raw_excel_source_entity_run",
     raw_excel_rows.c.source_id,
@@ -1186,6 +1308,14 @@ Index(
     pcr_derivation_run.c.is_current,
     unique=True,
     postgresql_where=pcr_derivation_run.c.is_current.is_(True),
+    sqlite_where=pcr_derivation_run.c.is_current.is_(True),
+)
+Index(
+    "uq_patient_episode_derivation_current",
+    patient_episode_derivation.c.is_current,
+    unique=True,
+    postgresql_where=patient_episode_derivation.c.is_current.is_(True),
+    sqlite_where=patient_episode_derivation.c.is_current.is_(True),
 )
 Index(
     "idx_pcr_interpretation_run_target",
@@ -1216,10 +1346,58 @@ def create_schema(engine: Engine) -> None:
     _upgrade_microb_determination_catalogs(engine)
     _upgrade_microb_sample_analysis_kind(engine)
     _upgrade_microb_sample_hospital(engine)
+    _upgrade_patient_episode_sample_primary_key(engine)
+    _require_global_pseudonym_registry_keys(engine)
     for table in metadata.tables.values():
         for index in table.indexes:
             index.create(engine, checkfirst=True)
     create_views(engine)
+
+
+def _upgrade_patient_episode_sample_primary_key(engine: Engine) -> None:
+    """Allow multiple sample memberships per episode derivation."""
+
+    if engine.dialect.name != "postgresql":
+        return
+    primary_key = inspect(engine).get_pk_constraint("patient_episode_sample")
+    columns = tuple(primary_key.get("constrained_columns") or ())
+    if columns == ("episode_derivation_id", "pcr_sample_id"):
+        return
+    if columns != ("episode_derivation_id",):
+        raise RuntimeError(
+            "patient_episode_sample has an unsupported primary key "
+            f"{columns!r}; expected ('episode_derivation_id',) or "
+            "('episode_derivation_id', 'pcr_sample_id')."
+        )
+    constraint_name = primary_key.get("name")
+    if not constraint_name:
+        raise RuntimeError(
+            "Could not identify the existing patient_episode_sample primary key."
+        )
+    preparer = engine.dialect.identifier_preparer
+    quoted_constraint = preparer.quote(constraint_name)
+    with engine.begin() as conn:
+        duplicates = conn.execute(text("""
+            SELECT 1
+            FROM patient_episode_sample
+            GROUP BY episode_derivation_id, pcr_sample_id
+            HAVING COUNT(*) > 1
+            LIMIT 1
+        """)).first()
+        if duplicates:
+            raise RuntimeError(
+                "Cannot migrate patient_episode_sample: duplicate derivation/PCR "
+                "sample memberships exist."
+            )
+        conn.execute(text(
+            "ALTER TABLE patient_episode_sample DROP CONSTRAINT "
+            f"{quoted_constraint}"
+        ))
+        conn.execute(text(
+            "ALTER TABLE patient_episode_sample ADD CONSTRAINT "
+            f"{quoted_constraint} PRIMARY KEY "
+            "(episode_derivation_id, pcr_sample_id)"
+        ))
 
 
 def _upgrade_json_documents(engine: Engine) -> None:
@@ -1250,6 +1428,34 @@ def _upgrade_json_documents(engine: Engine) -> None:
                     f"ALTER TABLE {table_name} ALTER COLUMN {column_name} "
                     f"TYPE JSONB USING {column_name}::jsonb"
                 )
+            )
+
+
+def _require_global_pseudonym_registry_keys(engine: Engine) -> None:
+    """Refuse views over a legacy source-scoped pseudonym registry."""
+
+    if engine.dialect.name != "postgresql":
+        return
+    inspector = inspect(engine)
+    for table_name in (
+        "pseudonym_patient_registry",
+        "pseudonym_sample_registry",
+    ):
+        unique_columns = {
+            tuple(constraint.get("column_names") or ())
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+        if ("source_identifier",) not in unique_columns:
+            detail = (
+                "source-scoped identifiers"
+                if ("source_id", "source_identifier") in unique_columns
+                else "no global identifier constraint"
+            )
+            raise RuntimeError(
+                f"The {table_name} still uses {detail}. "
+                "Run `fis-data globalize-pseudonyms --reason ... "
+                "--confirm-globalization GLOBALIZE-PSEUDONYMS` before using "
+                "downstream views."
             )
 
 
@@ -1630,12 +1836,22 @@ def create_views(engine: Engine) -> None:
             WHERE summary.derivation_id=({current})
         """,
         "v_pcr_sil_isolate_marker_summary": f"""
+            WITH st_by_isolate AS (
+                SELECT link.isolate_id,
+                       CASE WHEN COUNT(DISTINCT record.st_value) = 1
+                            THEN MIN(record.st_value) END AS st
+                FROM microb_isolate_st_link AS link
+                JOIN stg_st_record AS record
+                  ON record.st_record_id=link.st_record_id
+                GROUP BY link.isolate_id
+            )
             SELECT sample.sample_key, summary.isolate_id, summary.isolate_number,
                    summary.microorganism_code, summary.oxa_detected,
                    summary.kpc_detected, summary.ndm_detected, summary.vim_detected,
-                   summary.marker_codes_json
+                   summary.marker_codes_json, st_by_isolate.st
             FROM pcr_sil_isolate_marker_summary AS summary
             JOIN pcr_sample AS sample ON sample.pcr_sample_id=summary.pcr_sample_id
+            LEFT JOIN st_by_isolate ON st_by_isolate.isolate_id=summary.isolate_id
             WHERE summary.derivation_id=({current})
         """,
         "v_pcr_sil_culture_marker_summary": f"""
@@ -1699,13 +1915,22 @@ def create_views(engine: Engine) -> None:
                 LEFT JOIN pcr_interpretation AS interpretation ON interpretation.interpretation_id=selection.preferred_interpretation_id
                 WHERE selection.derivation_id=({current})
                 GROUP BY selection.pcr_sample_id
+            ), fis_flags AS (
+                SELECT pcr_sample_id,
+                       COALESCE(oxa48_specific, 0) AS oxa48,
+                       COALESCE(vim_specific, 0) AS vim,
+                       COALESCE(kpc_specific, 0) AS kpc,
+                       COALESCE(ndm_specific, 0) AS ndm
+                FROM pcr_flags
             ), metric_ranked AS (
-                SELECT metric.*, ROW_NUMBER() OVER (
-                    PARTITION BY metric.pcr_sample_id, metric.canonical_target
-                    ORDER BY run.run_started DESC NULLS LAST, metric.pcr_run_id DESC
-                ) AS position
+                SELECT metric.*
                 FROM pcr_sample_target_metric AS metric
-                LEFT JOIN pcr_run AS run ON run.pcr_run_id=metric.pcr_run_id
+                JOIN pcr_result_selection AS selected
+                  ON selected.derivation_id=metric.derivation_id
+                 AND selected.pcr_sample_id=metric.pcr_sample_id
+                 AND selected.run_type='SPECIFIC'
+                 AND selected.canonical_target=metric.canonical_target
+                 AND selected.preferred_interpretation_id=metric.target_interpretation_id
                 WHERE metric.derivation_id=({current})
             ), retrospective_markers AS (
                 SELECT retrospective.pcr_sample_id,
@@ -1754,7 +1979,10 @@ def create_views(engine: Engine) -> None:
                 LEFT JOIN retrospective_markers AS retrospective
                   ON retrospective.pcr_sample_id=matched.pcr_sample_id
             )
-            SELECT patient.nhc, sample.sample_number AS sample, sample.entered_at AS entry_date,
+            SELECT patient.nhc, sample.sample_number AS sample,
+                   patient_pseudonym.pseudonym AS patient_pseudonym,
+                   sample_pseudonym.pseudonym AS sample_pseudonym,
+                   sample.entered_at AS entry_date,
                    classification.culture_category AS result_interpretate,
                    COALESCE(resolved.oxa_detected, FALSE)::int AS oxa48,
                    COALESCE(resolved.vim_detected, FALSE)::int AS vim,
@@ -1775,8 +2003,10 @@ def create_views(engine: Engine) -> None:
                    pcr_flags.oxa48_specific, pcr_flags.kpc_specific,
                    CASE WHEN -1 IN (pcr_flags.oxa48_specific, pcr_flags.vim_specific, pcr_flags.kpc_specific, pcr_flags.ndm_specific) THEN 'INVALID'
                         ELSE (COALESCE(pcr_flags.oxa48_specific, 0)::text || COALESCE(pcr_flags.vim_specific, 0)::text || COALESCE(pcr_flags.kpc_specific, 0)::text || COALESCE(pcr_flags.ndm_specific, 0)::text) END AS encode_carba_specific,
-                   vim_metric.delta_cq AS vim_log_delta, ndm_metric.delta_cq AS ndm_log_delta,
-                   oxa_metric.delta_cq AS oxa48_log_delta, kpc_metric.delta_cq AS kpc_log_delta,
+                   CASE WHEN fis.vim=1 THEN vim_metric.delta_cq END AS vim_log_delta,
+                   CASE WHEN fis.ndm=1 THEN ndm_metric.delta_cq END AS ndm_log_delta,
+                   CASE WHEN fis.oxa48=1 THEN oxa_metric.delta_cq END AS oxa48_log_delta,
+                   CASE WHEN fis.kpc=1 THEN kpc_metric.delta_cq END AS kpc_log_delta,
                    result.pcr_category, result.warning_code,
                    CASE
                      WHEN pcr_flags.oxa48_specific IS NULL
@@ -1799,9 +2029,12 @@ def create_views(engine: Engine) -> None:
                        THEN 'SPECIFIC_VALID'
                      ELSE 'SPECIFIC_INVALID'
                    END AS specific_validation,
-                   CASE WHEN -1 IN (pcr_flags.oxa48_specific, pcr_flags.vim_specific, pcr_flags.kpc_specific, pcr_flags.ndm_specific) THEN 'INVALID'
-                        ELSE (COALESCE(pcr_flags.oxa48_specific, 0)::text || COALESCE(pcr_flags.vim_specific, 0)::text || COALESCE(pcr_flags.kpc_specific, 0)::text || COALESCE(pcr_flags.ndm_specific, 0)::text) END AS encode_fis,
-                   (COALESCE(resolved.oxa_detected, FALSE)::int::text || COALESCE(resolved.vim_detected, FALSE)::int::text || COALESCE(resolved.kpc_detected, FALSE)::int::text || COALESCE(resolved.ndm_detected, FALSE)::int::text) AS resolved_encoded,
+                   fis.oxa48 AS fis_oxa48,
+                   fis.vim AS fis_vim,
+                   fis.kpc AS fis_kpc,
+                   fis.ndm AS fis_ndm,
+                   CASE WHEN -1 IN (fis.oxa48, fis.vim, fis.kpc, fis.ndm) THEN 'INVALID'
+                        ELSE (COALESCE(fis.oxa48, 0)::text || COALESCE(fis.vim, 0)::text || COALESCE(fis.kpc, 0)::text || COALESCE(fis.ndm, 0)::text) END AS encode_fis,
                    COALESCE(culture.oxa_detected, FALSE)::int AS direct_oxa48,
                    COALESCE(culture.vim_detected, FALSE)::int AS direct_vim,
                    COALESCE(culture.kpc_detected, FALSE)::int AS direct_kpc,
@@ -1811,20 +2044,61 @@ def create_views(engine: Engine) -> None:
             JOIN matched ON matched.pcr_sample_id=result.pcr_sample_id
             JOIN microb_sample AS sample ON sample.sample_id=matched.microb_sample_id
             LEFT JOIN microb_patient AS patient ON patient.patient_id=sample.patient_id
+            LEFT JOIN pseudonym_patient_registry AS patient_pseudonym
+              ON patient_pseudonym.source_identifier=patient.nhc
+            LEFT JOIN pseudonym_sample_registry AS sample_pseudonym
+              ON sample_pseudonym.source_identifier=sample.sample_number
             LEFT JOIN ref_microb_catalog_entry AS origin ON origin.ref_microb_catalog_entry_id=sample.origin_id
             LEFT JOIN ref_microb_catalog_entry AS service ON service.ref_microb_catalog_entry_id=sample.service_id
             LEFT JOIN pcr_sil_culture_classification AS classification ON classification.derivation_id=result.derivation_id AND classification.microb_sample_id=sample.sample_id
             LEFT JOIN pcr_sil_culture_marker_summary AS culture ON culture.derivation_id=result.derivation_id AND culture.pcr_sample_id=result.pcr_sample_id AND culture.microb_sample_id=sample.sample_id
             LEFT JOIN pcr_flags ON pcr_flags.pcr_sample_id=result.pcr_sample_id
+            LEFT JOIN fis_flags AS fis ON fis.pcr_sample_id=result.pcr_sample_id
             LEFT JOIN resolved ON resolved.pcr_sample_id=result.pcr_sample_id
-            LEFT JOIN metric_ranked AS vim_metric ON vim_metric.pcr_sample_id=result.pcr_sample_id AND vim_metric.canonical_target='VIM' AND vim_metric.position=1
-            LEFT JOIN metric_ranked AS ndm_metric ON ndm_metric.pcr_sample_id=result.pcr_sample_id AND ndm_metric.canonical_target='NDM' AND ndm_metric.position=1
-            LEFT JOIN metric_ranked AS oxa_metric ON oxa_metric.pcr_sample_id=result.pcr_sample_id AND oxa_metric.canonical_target='OXA48' AND oxa_metric.position=1
-            LEFT JOIN metric_ranked AS kpc_metric ON kpc_metric.pcr_sample_id=result.pcr_sample_id AND kpc_metric.canonical_target='KPC' AND kpc_metric.position=1
+            LEFT JOIN metric_ranked AS vim_metric ON vim_metric.pcr_sample_id=result.pcr_sample_id AND vim_metric.canonical_target='VIM'
+            LEFT JOIN metric_ranked AS ndm_metric ON ndm_metric.pcr_sample_id=result.pcr_sample_id AND ndm_metric.canonical_target='NDM'
+            LEFT JOIN metric_ranked AS oxa_metric ON oxa_metric.pcr_sample_id=result.pcr_sample_id AND oxa_metric.canonical_target='OXA48'
+            LEFT JOIN metric_ranked AS kpc_metric ON kpc_metric.pcr_sample_id=result.pcr_sample_id AND kpc_metric.canonical_target='KPC'
             WHERE result.derivation_id=({current})
         """,
         "v_downstream_sil_pcr_organism": f"""
-            WITH resolved_organism AS (
+            WITH st_by_isolate AS (
+                SELECT link.isolate_id,
+                       CASE WHEN COUNT(DISTINCT record.st_value)=1
+                            THEN MIN(record.st_value) END AS st,
+                       COUNT(DISTINCT record.st_value)>1 AS has_conflict
+                FROM microb_isolate_st_link AS link
+                JOIN stg_st_record AS record
+                  ON record.st_record_id=link.st_record_id
+                GROUP BY link.isolate_id
+            ), st_conflict_key AS (
+                SELECT DISTINCT sample_number, microorganism_code
+                FROM stg_st_record
+                WHERE match_status='CONFLICTING_ST_VALUES'
+            ), st_by_organism AS (
+                SELECT isolate_summary.pcr_sample_id,
+                       isolate_summary.microb_sample_id,
+                       isolate_summary.microorganism_code,
+                       CASE
+                         WHEN BOOL_OR(COALESCE(st_by_isolate.has_conflict, FALSE))
+                           OR BOOL_OR(st_conflict_key.sample_number IS NOT NULL)
+                           THEN NULL
+                         ELSE STRING_AGG(DISTINCT st_by_isolate.st, ', '
+                                         ORDER BY st_by_isolate.st)
+                       END AS st
+                FROM pcr_sil_isolate_marker_summary AS isolate_summary
+                JOIN microb_sample AS sample
+                  ON sample.sample_id=isolate_summary.microb_sample_id
+                LEFT JOIN st_by_isolate
+                  ON st_by_isolate.isolate_id=isolate_summary.isolate_id
+                LEFT JOIN st_conflict_key
+                  ON st_conflict_key.sample_number=sample.sample_number
+                 AND st_conflict_key.microorganism_code=isolate_summary.microorganism_code
+                WHERE isolate_summary.derivation_id=({current})
+                GROUP BY isolate_summary.pcr_sample_id,
+                         isolate_summary.microb_sample_id,
+                         isolate_summary.microorganism_code
+            ), resolved_organism AS (
                 SELECT organism.pcr_sample_id, organism.microb_sample_id AS current_microb_sample_id,
                        organism.microorganism_code,
                        CASE WHEN evidence.evidence_status='ACCEPTED'
@@ -1869,7 +2143,8 @@ def create_views(engine: Engine) -> None:
                    COALESCE(organism.oxa_detected, FALSE)::int AS direct_organism_oxa48,
                    COALESCE(organism.vim_detected, FALSE)::int AS direct_organism_vim,
                    COALESCE(organism.kpc_detected, FALSE)::int AS direct_organism_kpc,
-                   COALESCE(organism.ndm_detected, FALSE)::int AS direct_organism_ndm
+                   COALESCE(organism.ndm_detected, FALSE)::int AS direct_organism_ndm,
+                   st_by_organism.st
             FROM v_downstream_sil_pcr_global AS summary_global
             JOIN pcr_sample AS pcr_sample ON pcr_sample.sample_key=summary_global.sample
             LEFT JOIN pcr_sil_organism_marker_summary AS organism
@@ -1878,6 +2153,10 @@ def create_views(engine: Engine) -> None:
               ON resolved_organism.pcr_sample_id=organism.pcr_sample_id
              AND resolved_organism.current_microb_sample_id=organism.microb_sample_id
              AND resolved_organism.microorganism_code=organism.microorganism_code
+            LEFT JOIN st_by_organism
+              ON st_by_organism.pcr_sample_id=organism.pcr_sample_id
+             AND st_by_organism.microb_sample_id=organism.microb_sample_id
+             AND st_by_organism.microorganism_code=organism.microorganism_code
             LEFT JOIN LATERAL (
                 SELECT entry.description
                 FROM ref_microb_catalog_entry AS entry
@@ -1888,6 +2167,130 @@ def create_views(engine: Engine) -> None:
                 ORDER BY catalog.is_current DESC, entry.ref_microb_catalog_entry_id DESC
                 LIMIT 1
             ) AS microorganism ON TRUE
+        """,
+        "v_downstream_pcr_sil_target": f"""
+            SELECT summary.sample_pseudonym, summary.patient_pseudonym,
+                   target.canonical_target, target.marker_name,
+                   target.fis_result, target.screening_result, target.specific_result,
+                   summary.specific_status, summary.specific_validation,
+                   target.sil_result, target.direct_sil_result,
+                   target.log_delta, summary.pcr_category,
+                   summary.result_interpretate AS culture_category,
+                   summary.result_itself,
+                   link.link_type, link.concordance AS sil_concordance,
+                   link.policy_version AS sil_policy_version,
+                   link.reason AS sil_link_reason
+            FROM v_downstream_sil_pcr_global AS summary
+            CROSS JOIN LATERAL (VALUES
+                ('OXA48', 'OXA-48', summary.fis_oxa48, summary.oxa48_screening,
+                 summary.oxa48_specific, summary.oxa48, summary.direct_oxa48,
+                 summary.oxa48_log_delta),
+                ('VIM', 'VIM', summary.fis_vim, summary.vim_screening,
+                 summary.vim_specific, summary.vim, summary.direct_vim,
+                 summary.vim_log_delta),
+                ('KPC', 'KPC', summary.fis_kpc, summary.kpc_screening,
+                 summary.kpc_specific, summary.kpc, summary.direct_kpc,
+                 summary.kpc_log_delta),
+                ('NDM', 'NDM', summary.fis_ndm, summary.ndm_screening,
+                 summary.ndm_specific, summary.ndm, summary.direct_ndm,
+                 summary.ndm_log_delta)
+            ) AS target(canonical_target, marker_name, fis_result,
+                        screening_result, specific_result, sil_result,
+                        direct_sil_result, log_delta)
+            LEFT JOIN pcr_sample AS sample
+              ON sample.sample_key=summary.sample
+            LEFT JOIN pcr_sil_result_link AS link
+              ON link.derivation_id=({current})
+             AND link.pcr_sample_id=sample.pcr_sample_id
+             AND link.run_type='SPECIFIC'
+             AND link.canonical_target=target.canonical_target
+        """,
+        "v_downstream_sil_organism_target": f"""
+            SELECT organism.sample_pseudonym, organism.patient_pseudonym,
+                   organism.microorg_code, organism.microorg_name,
+                   target.canonical_target, target.marker_name,
+                   target.organism_result, target.direct_organism_result,
+                   organism.isolate_count, organism.st
+            FROM v_downstream_sil_pcr_organism AS organism
+            CROSS JOIN LATERAL (VALUES
+                ('OXA48', 'OXA-48', organism.organism_oxa48, organism.direct_organism_oxa48),
+                ('VIM', 'VIM', organism.organism_vim, organism.direct_organism_vim),
+                ('KPC', 'KPC', organism.organism_kpc, organism.direct_organism_kpc),
+                ('NDM', 'NDM', organism.organism_ndm, organism.direct_organism_ndm)
+            ) AS target(canonical_target, marker_name,
+                        organism_result, direct_organism_result)
+            WHERE organism.microorg_code IS NOT NULL
+        """,
+        "v_downstream_sil_organism_profile": f"""
+            SELECT sample_pseudonym, patient_pseudonym, microorg_code,
+                   microorg_name, encoded_carba_org AS reconciled_profile,
+                   (direct_organism_oxa48::text || direct_organism_vim::text ||
+                    direct_organism_kpc::text || direct_organism_ndm::text) AS direct_profile,
+                   isolate_count, st
+            FROM v_downstream_sil_pcr_organism
+            WHERE microorg_code IS NOT NULL
+        """,
+        "v_downstream_pcr_sil_sample_profile": f"""
+            WITH organism_counts AS (
+                SELECT sample_pseudonym,
+                       COUNT(DISTINCT microorg_code) AS microorganism_count,
+                       SUM(isolate_count) AS isolate_count,
+                       COUNT(DISTINCT microorg_code) FILTER (
+                           WHERE organism_oxa48=1 OR organism_vim=1
+                              OR organism_kpc=1 OR organism_ndm=1
+                       ) AS carrier_microorganism_count
+                FROM v_downstream_sil_pcr_organism
+                WHERE microorg_code IS NOT NULL
+                GROUP BY sample_pseudonym
+            )
+            SELECT summary.sample_pseudonym, summary.patient_pseudonym,
+                   summary.encode_fis AS fis_profile,
+                   summary.global_encoded AS reconciled_culture_profile,
+                   summary.direct_global_encoded AS direct_culture_profile,
+                   summary.pcr_category, summary.result_interpretate AS culture_category,
+                   COALESCE(counts.microorganism_count, 0) AS microorganism_count,
+                   COALESCE(counts.carrier_microorganism_count, 0) AS carrier_microorganism_count,
+                   COALESCE(counts.isolate_count, 0) AS isolate_count
+            FROM v_downstream_sil_pcr_global AS summary
+            LEFT JOIN organism_counts AS counts
+              ON counts.sample_pseudonym=summary.sample_pseudonym
+        """,
+        "v_downstream_patient_episode": f"""
+            SELECT derivation.episode_derivation_id, derivation.pcr_derivation_id,
+                   derivation.algorithm_version, derivation.parameters_json,
+                   episode.patient_episode_id, patient_map.pseudonym AS patient_pseudonym,
+                   episode.episode_number, episode.started_at, episode.ended_at,
+                   episode.sample_count, episode.start_reason
+            FROM patient_episode_derivation AS derivation
+            JOIN patient_episode AS episode
+              ON episode.episode_derivation_id=derivation.episode_derivation_id
+            JOIN microb_patient AS patient
+              ON patient.patient_id=episode.patient_id
+            LEFT JOIN pseudonym_patient_registry AS patient_map
+              ON patient_map.source_identifier=patient.nhc
+            WHERE derivation.status='SUCCESS' AND derivation.is_current=TRUE
+        """,
+        "v_downstream_patient_episode_sample": f"""
+            SELECT membership.episode_derivation_id,
+                   derivation.pcr_derivation_id,
+                   patient_map.pseudonym AS patient_pseudonym,
+                   sample_map.pseudonym AS sample_pseudonym,
+                   episode.episode_number, membership.clinical_date,
+                   membership.days_since_previous
+            FROM patient_episode_sample AS membership
+            JOIN patient_episode_derivation AS derivation
+              ON derivation.episode_derivation_id=membership.episode_derivation_id
+            JOIN patient_episode AS episode
+              ON episode.patient_episode_id=membership.patient_episode_id
+            JOIN microb_sample AS sample
+              ON sample.sample_id=membership.microb_sample_id
+            JOIN microb_patient AS patient
+              ON patient.patient_id=sample.patient_id
+            LEFT JOIN pseudonym_patient_registry AS patient_map
+              ON patient_map.source_identifier=patient.nhc
+            LEFT JOIN pseudonym_sample_registry AS sample_map
+              ON sample_map.source_identifier=sample.sample_number
+            WHERE derivation.status='SUCCESS' AND derivation.is_current=TRUE
         """,
         "v_pcr_run_qc": f"""
             SELECT run_qc.*, run.run_name FROM pcr_run_qc AS run_qc

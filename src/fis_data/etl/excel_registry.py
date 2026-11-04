@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from .excel_profiles import FARMACIA_EXCEL_PARSER, ExcelEntityParser
 from .pcr.excel_parser import PCR_EXCEL_PARSER
+from .st.excel_parser import ST_EXCEL_PARSER
 
 EXCEL_ENTITY_PARSERS = {
     FARMACIA_EXCEL_PARSER.entity_name: FARMACIA_EXCEL_PARSER,
     PCR_EXCEL_PARSER.entity_name: PCR_EXCEL_PARSER,
+    ST_EXCEL_PARSER.entity_name: ST_EXCEL_PARSER,
 }
 
 

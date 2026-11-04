@@ -192,11 +192,7 @@ def interpret_curve(
                 call=(
                     ResultLevels.positive
                     if cq_valid and best is not None
-                    else (
-                        ResultLevels.indeterminate
-                        if melting_incompatible
-                        else ResultLevels.negative
-                    )
+                    else ResultLevels.negative
                 ),
                 peak_temperature=(best or observed).temperature if (best or observed) else None,
                 peak_deriv_rfu=(best or observed).deriv_rfu if (best or observed) else None,

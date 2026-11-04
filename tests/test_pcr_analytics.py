@@ -48,13 +48,18 @@ from fis_data.schema import (
     ctl_etl_run,
     ctl_file_registry,
     ctl_source,
+    microb_sample,
+    microb_sample_analysis,
     pcr_cq_result,
     pcr_derivation_run,
+    pcr_microb_well_validation,
     pcr_rfu_measurement,
     pcr_run,
     pcr_run_scope,
     pcr_run_attribute,
     pcr_well,
+    ref_microb_catalog,
+    ref_microb_catalog_entry,
 )
 
 
@@ -333,7 +338,7 @@ def test_fail_target_only_invalidates_its_own_interpretation() -> None:
     assert calls[0].error == "TARGET FAILED"
 
 
-def test_specific_target_preserves_cq_as_indeterminate_on_melting_mismatch() -> None:
+def test_specific_target_is_negative_on_melting_mismatch_with_trace() -> None:
     calls, peaks = interpret_curve(
         source_target="OXA48",
         cq=21.2,
@@ -343,7 +348,7 @@ def test_specific_target_preserves_cq_as_indeterminate_on_melting_mismatch() -> 
     )
 
     assert len(peaks) == 1
-    assert calls[0].call == "INDETERMINATE"
+    assert calls[0].call == "NEGATIVE"
     assert calls[0].error == "MELTING_INCOMPATIBLE"
     assert calls[0].peak_temperature == 82.5
     assert calls[0].compatible_targets == ("VIM",)
@@ -358,7 +363,7 @@ def test_melting_compatibility_uses_the_configured_half_degree_window() -> None:
         params=MeltingParameters(),
     )
 
-    assert calls[0].call == "INDETERMINATE"
+    assert calls[0].call == "NEGATIVE"
     assert calls[0].error == "MELTING_INCOMPATIBLE"
     assert calls[0].compatible_targets == ()
 
@@ -693,7 +698,9 @@ def test_analytics_job_is_a_facade_over_injected_collaborators() -> None:
     ]
 
 
-def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> None:
+def test_pcr_analytics_classifies_controls_and_invalidates_target(
+    tmp_path, monkeypatch
+) -> None:
     db_path = tmp_path / "analytics.sqlite"
     engine = create_engine(f"sqlite:///{db_path}", future=True)
     create_schema(engine)
@@ -702,6 +709,49 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
             conn.execute(
                 insert(ctl_source).values(source_name="PCR", source_type="dummy")
             ).inserted_primary_key[0]
+        )
+        microb_source_id = int(
+            conn.execute(
+                insert(ctl_source).values(source_name="Microb", source_type="Microb")
+            ).inserted_primary_key[0]
+        )
+        catalog_id = int(
+            conn.execute(
+                insert(ref_microb_catalog).values(
+                    catalog_name="test-specimens",
+                    source_path="test",
+                    sha256="b" * 64,
+                    entry_count=1,
+                    is_current=True,
+                )
+            ).inserted_primary_key[0]
+        )
+        specimen_id = int(
+            conn.execute(
+                insert(ref_microb_catalog_entry).values(
+                    ref_microb_catalog_id=catalog_id,
+                    code="068",
+                    description="RECTAL",
+                    aliases_json="[]",
+                    raw_fields_json="{}",
+                )
+            ).inserted_primary_key[0]
+        )
+        microb_sample_id = int(
+            conn.execute(
+                insert(microb_sample).values(
+                    source_id=microb_source_id,
+                    sample_number="00123",
+                    specimen_type_id=specimen_id,
+                )
+            ).inserted_primary_key[0]
+        )
+        conn.execute(
+            insert(microb_sample_analysis).values(
+                sample_id=microb_sample_id,
+                analysis_code="PMDR",
+                analysis_kind="BACTERIOLOGICAL",
+            )
         )
         etl_run_id = int(
             conn.execute(
@@ -808,6 +858,82 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
                 )
         conn.execute(insert(pcr_rfu_measurement), measurements)
 
+    def validate_sqlite_microb_matches(repository, derivation_id: int) -> None:
+        """Apply the test's exact-match precondition on SQLite."""
+
+        with repository.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT classification.pcr_well_id,
+                           classification.pcr_sample_id,
+                           classification.well_role,
+                           classification.review_reason,
+                           COUNT(microb.sample_id) AS match_count,
+                           MIN(microb.sample_id) AS microb_sample_id,
+                           MIN(specimen.code) AS specimen_code,
+                           MAX(CASE WHEN analysis.sample_id IS NOT NULL THEN 1 ELSE 0 END)
+                               AS has_pmdr
+                    FROM pcr_well_classification AS classification
+                    LEFT JOIN pcr_sample AS sample
+                      ON sample.pcr_sample_id=classification.pcr_sample_id
+                    LEFT JOIN microb_sample AS microb
+                      ON microb.sample_number=sample.sample_key
+                    LEFT JOIN ref_microb_catalog_entry AS specimen
+                      ON specimen.ref_microb_catalog_entry_id=microb.specimen_type_id
+                    LEFT JOIN microb_sample_analysis AS analysis
+                      ON analysis.sample_id=microb.sample_id
+                     AND analysis.analysis_code='PMDR'
+                     AND analysis.analysis_kind='BACTERIOLOGICAL'
+                    WHERE classification.derivation_id=:derivation_id
+                    GROUP BY classification.pcr_well_id,
+                             classification.pcr_sample_id,
+                             classification.well_role,
+                             classification.review_reason
+                    """
+                ),
+                {"derivation_id": derivation_id},
+            ).mappings()
+            for row in rows:
+                status = (
+                    "CONTROL_EXCLUDED"
+                    if row["well_role"] != "REAL_SAMPLE"
+                    else "REAL_SAMPLE_REVIEW_EXCLUDED"
+                    if row["review_reason"] is not None
+                    else "MATCH_ELIGIBLE"
+                    if row["match_count"] == 1
+                    and row["specimen_code"] == "068"
+                    and row["has_pmdr"]
+                    else "REAL_SAMPLE_NO_MATCH"
+                    if row["match_count"] == 0
+                    else "REAL_SAMPLE_AMBIGUOUS"
+                    if row["match_count"] > 1
+                    else "MATCH_INVALID_SPECIMEN"
+                    if row["specimen_code"] != "068"
+                    else "MATCH_INVALID_ANALYSIS"
+                )
+                conn.execute(
+                    insert(pcr_microb_well_validation).values(
+                        derivation_id=derivation_id,
+                        pcr_well_id=row["pcr_well_id"],
+                        pcr_sample_id=row["pcr_sample_id"],
+                        microb_sample_id=(
+                            row["microb_sample_id"]
+                            if row["match_count"] == 1
+                            else None
+                        ),
+                        validation_status=status,
+                        validation_reason=None,
+                        details_json=json.dumps({"source": "sqlite_test_fixture"}),
+                    )
+                )
+
+    monkeypatch.setattr(
+        PCRAnalyticsRepository,
+        "validate_microb_samples",
+        validate_sqlite_microb_matches,
+    )
+
     stats = PCRAnalyticsJob(engine).run(
         algorithm_version="test-v1",
         rebuild=True,
@@ -816,6 +942,31 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
     assert stats.wells_classified == 4
     assert stats.real_samples == 1
     with engine.begin() as conn:
+        # create_schema() intentionally installs analytical views only on
+        # PostgreSQL. Provide the equivalent read-only view needed by this
+        # SQLite-backed unit test without changing the assertions under test.
+        conn.execute(
+            text(
+                """
+                CREATE VIEW v_pcr_target_qc_evidence AS
+                SELECT qc.pcr_run_id, evidence.well_role,
+                       interpretation.call, interpretation.cq,
+                       interpretation.peak_temperature, interpretation.error,
+                       qc.canonical_target
+                FROM pcr_target_qc_evidence AS evidence
+                JOIN pcr_target_qc AS qc
+                  ON qc.derivation_id=evidence.derivation_id
+                 AND qc.pcr_run_id=evidence.pcr_run_id
+                 AND qc.canonical_target=evidence.canonical_target
+                JOIN pcr_interpretation AS interpretation
+                  ON interpretation.interpretation_id=evidence.interpretation_id
+                WHERE evidence.derivation_id=(
+                    SELECT derivation_id FROM pcr_derivation_run
+                    WHERE is_current=1 LIMIT 1
+                )
+                """
+            )
+        )
         classifications = conn.execute(
             text(
                 """
@@ -913,6 +1064,48 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
 
     PCRAnalyticsJob(engine).run(algorithm_version="test-override", rebuild=True)
     with engine.begin() as conn:
+        # Keep the review assertion against the same public view contract on
+        # SQLite; the production view uses PostgreSQL JSON operators.
+        conn.execute(
+            text(
+                """
+                CREATE VIEW v_pcr_effective_result AS
+                WITH ranked_override AS (
+                    SELECT item_type, subject_key, action, payload_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY item_type, subject_key
+                               ORDER BY review_action_id DESC
+                           ) AS position
+                    FROM pcr_review_action
+                    WHERE item_type='RESULT' AND action IN ('OVERRIDE', 'REVOKE')
+                )
+                SELECT sample.sample_key, selection.run_type,
+                       selection.canonical_target,
+                       COALESCE(json_extract(override.payload_json, '$.call'),
+                                interpretation.call) AS call,
+                       CASE WHEN override.action='OVERRIDE' THEN 1 ELSE 0 END
+                           AS has_override
+                FROM pcr_result_selection AS selection
+                JOIN pcr_sample AS sample
+                  ON sample.pcr_sample_id=selection.pcr_sample_id
+                LEFT JOIN pcr_interpretation AS interpretation
+                  ON interpretation.interpretation_id=
+                     selection.preferred_interpretation_id
+                LEFT JOIN ranked_override AS override
+                  ON override.position=1 AND override.action='OVERRIDE'
+                 AND override.subject_key=('sample:' || sample.sample_key ||
+                     ':run_type:' || selection.run_type || ':target:' ||
+                     selection.canonical_target)
+                LEFT JOIN pcr_run_scope AS scope
+                  ON scope.pcr_run_id=interpretation.pcr_run_id
+                WHERE selection.derivation_id=(
+                    SELECT derivation_id FROM pcr_derivation_run
+                    WHERE is_current=1 LIMIT 1
+                )
+                  AND COALESCE(scope.analytical_scope, 'ROUTINE') != 'EXPERIMENTAL'
+                """
+            )
+        )
         overridden_selection = conn.execute(
             text(
                 """
@@ -952,11 +1145,13 @@ def test_pcr_analytics_classifies_controls_and_invalidates_target(tmp_path) -> N
     assert overridden_well == ("REAL_SAMPLE", "999")
     assert manual_episode.startswith("MANUAL:")
 
+    monkeypatch.setattr("fis_data.cli._engine_for_db_url", lambda _url: engine)
+    monkeypatch.setattr("fis_data.cli.create_schema", lambda _engine: None)
     cli_result = CliRunner().invoke(
         cli,
         [
             "derive-pcr",
-            "--db-path",
+            "--db-url",
             str(db_path),
             "--algorithm-version",
             "test-v2",

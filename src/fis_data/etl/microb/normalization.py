@@ -8,14 +8,16 @@ from datetime import date, datetime
 from math import ceil
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection, Engine
 
 from ...json_utils import loads_json
 from ...schema import (
+    ctl_materialization_item,
     microb_analysis_result, microb_determination, microb_entity_lineage,
-    microb_isolate, microb_isolate_observation, microb_normalization_issue,
+    microb_isolate, microb_isolate_observation, microb_isolate_st_link,
+    microb_normalization_issue,
     microb_patient, microb_sample, microb_sample_analysis,
     microb_sample_observation, microb_susceptibility_result,
     pcr_microb_well_validation, pcr_sil_culture_classification,
@@ -23,7 +25,7 @@ from ...schema import (
     pcr_sil_link_candidate, pcr_sil_organism_marker_summary,
     pcr_sil_result_link, pcr_sil_retrospective_evidence,
     ref_microb_catalog, ref_microb_catalog_entry, stg_microb_antibiogram,
-    stg_microb_technique,
+    stg_microb_technique, stg_st_record,
 )
 
 BATCH_SIZE = 5_000
@@ -80,6 +82,20 @@ def _date(value: Any) -> date | None:
     return parsed.date() if parsed else None
 
 
+def _invalidate_st_links(conn: Connection, *, reason: str) -> None:
+    """Retain ST inputs but require their isolate matches to be rebuilt."""
+
+    conn.execute(delete(microb_isolate_st_link))
+    conn.execute(update(stg_st_record).values(
+        match_status="PENDING_MICROB_RELINK",
+        matched_sample_count=0,
+        matched_isolate_count=0,
+    ))
+    conn.execute(update(ctl_materialization_item).where(
+        ctl_materialization_item.c.materializer_name == "st-domain"
+    ).values(status="REPROCESS_REQUIRED", error=reason))
+
+
 class MicrobNormalizer:
     """Load staging rows in clinical-entity batches, preserving provenance."""
 
@@ -106,6 +122,7 @@ class MicrobNormalizer:
             microb_determination,
             microb_entity_lineage,
             microb_normalization_issue,
+            microb_isolate_st_link,
             microb_isolate,
             microb_analysis_result,
             microb_sample_analysis,
@@ -114,6 +131,7 @@ class MicrobNormalizer:
         )
         table_names = ", ".join(table.name for table in tables)
         with self.engine.begin() as conn:
+            _invalidate_st_links(conn, reason="Microb rebuild invalidated ST isolate links.")
             conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY"))
 
     def batch_count(self, *, file_id: int | None = None) -> int:
@@ -130,12 +148,19 @@ class MicrobNormalizer:
         catalogs, hospital_links = self._catalogs()
         counts = {"techniques": 0, "susceptibilities": 0, "issues": 0}
         last_id = 0
+        st_links_invalidated = False
         while True:
             batch = self._fetch_batch(file_id=file_id, last_id=last_id)
             if not batch:
                 return counts
             last_id = int(batch[-1]["stg_microb_technique_id"])
             with self.engine.begin() as conn:
+                if not st_links_invalidated:
+                    _invalidate_st_links(
+                        conn,
+                        reason="Microb normalization changed isolate matching inputs.",
+                    )
+                    st_links_invalidated = True
                 stats = self._normalize_batch(
                     conn, batch, catalogs, hospital_links, on_stage
                 )
