@@ -1876,14 +1876,16 @@ def create_views(engine: Engine) -> None:
                    candidate.days_difference, candidate.negative_count,
                    retrospective.evidence_status,
                    retrospective.matched_microorganism_code,
-                   COALESCE(direct_sample.sample_number, evidence.sample_number, candidate_evidence.sample_number) AS result_sample,
+                   COALESCE(direct_sample.sample_number, evidence.sample_number, candidate_evidence.sample_number, current_sample.sample_number) AS result_sample,
                    COALESCE(direct_sample.received_at, direct_sample.entered_at,
                             evidence.received_at, evidence.entered_at,
-                            candidate_evidence.received_at, candidate_evidence.entered_at) AS result_entry_date,
+                            candidate_evidence.received_at, candidate_evidence.entered_at,
+                            current_sample.received_at, current_sample.entered_at) AS result_entry_date,
                    CASE WHEN direct_sample.sample_id IS NOT NULL THEN TRUE
-                        WHEN link.link_type='DIRECT' THEN TRUE
-                        WHEN link.link_type='PRIOR_COMPATIBLE' THEN FALSE
-                        ELSE NULL END AS result_itself
+                        WHEN retrospective.evidence_status='ACCEPTED' THEN FALSE
+                        WHEN candidate.candidate_kind='PRIOR'
+                         AND candidate.candidate_status='ACCEPTED' THEN FALSE
+                        ELSE TRUE END AS result_itself
             FROM pcr_sil_result_link AS link
             JOIN pcr_sample AS sample ON sample.pcr_sample_id=link.pcr_sample_id
             LEFT JOIN pcr_sil_culture_marker_summary AS direct_culture
@@ -1899,6 +1901,9 @@ def create_views(engine: Engine) -> None:
              AND retrospective.pcr_sample_id=link.pcr_sample_id
             LEFT JOIN microb_sample AS evidence
               ON evidence.sample_id=retrospective.evidence_microb_sample_id
+             AND retrospective.evidence_status='ACCEPTED'
+            LEFT JOIN microb_sample AS current_sample
+              ON current_sample.sample_id=retrospective.current_microb_sample_id
             LEFT JOIN microb_sample AS candidate_evidence
               ON candidate_evidence.sample_id=candidate.evidence_microb_sample_id
             WHERE link.derivation_id=({current})

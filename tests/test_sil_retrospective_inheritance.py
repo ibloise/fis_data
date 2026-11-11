@@ -529,3 +529,19 @@ def test_export_provenance_is_current_without_marker_summary(model, category):
         assert row["result_itself"] == expected
     assert "summary.result_itself" in model.views["v_downstream_pcr_sil_target"]
     assert "summary_global.*" in model.views["v_downstream_sil_pcr_organism"]
+
+
+@pytest.mark.parametrize("link_type", ["DIRECT", "PRIOR_COMPATIBLE", "DISCORDANT", "NO_EVIDENCE"])
+@pytest.mark.parametrize("accepted", [False, True])
+def test_link_export_provenance_depends_on_evidence_not_concordance(model, link_type, accepted):
+    view = model.views["v_pcr_sil_result_link"]
+    expression = re.search(r"CASE WHEN direct_sample.sample_id.*? AS result_itself", view, re.S).group(0)
+    for direct_id in (None, 100):
+        row = model.db.execute(
+            "SELECT " + expression + " FROM (SELECT ? AS sample_id) AS direct_sample "
+            "CROSS JOIN (SELECT ? AS link_type) AS link "
+            "CROSS JOIN (SELECT ? AS evidence_status) AS retrospective "
+            "CROSS JOIN (SELECT NULL AS candidate_kind, NULL AS candidate_status) AS candidate",
+            (direct_id, link_type, "ACCEPTED" if accepted else "NO_EVIDENCE"),
+        ).fetchone()
+        assert row["result_itself"] == int(direct_id is not None or not accepted)
