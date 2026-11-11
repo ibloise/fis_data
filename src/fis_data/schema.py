@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from .etl.pcr.analytics.sil_linking import direct_characterization_exists_sql
-
 import json
 from typing import Any
 
@@ -1626,6 +1624,10 @@ def _upgrade_microb_sample_hospital(engine: Engine) -> None:
 
 def create_views(engine: Engine) -> None:
     """Create the public PCR views managed by the database schema."""
+
+    # Analytics imports schema tables during package initialization. Defer this
+    # dependency until the schema module has finished defining those tables.
+    from .etl.pcr.analytics.sil_linking import direct_characterization_exists_sql
 
     if engine.dialect.name != "postgresql":
         return
