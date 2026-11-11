@@ -111,7 +111,7 @@ la iteración de todos ellos; no se buscan muestras distintas para *E. coli* y
 temporal, aparece un cultivo positivo sin ningún organismo actual o no hay
 muestra previa, la búsqueda termina sin herencia.
 
-La política `pcr-sil-linking-v3` hereda los marcadores OXA/KPC/NDM/VIM
+La política `pcr-sil-linking-v4` hereda los marcadores OXA/KPC/NDM/VIM
 por coincidencia exacta de código entre los aislados originales y los de la
 única muestra previa seleccionada. Se evalúan todos los organismos originales:
 si están presentes en la muestra previa, sus marcadores positivos se agregan
@@ -203,3 +203,30 @@ Para cada target PCR, `pcr_sil_result_link` conserva `DIRECT`,
 declara cuando hay evidencia SIL para el mismo marcador: una PCR positiva es
 `CONCORDANT` y una PCR negativa `DISCORDANT`; los demás casos son
 `NOT_ASSESSABLE`.
+
+### Política conservadora v4
+
+La búsqueda solo comienza si **todos** los aislados relevantes del cultivo
+carecen de BLE, OXA, KPC, NDM y VIM positivas. Una sola caracterización positiva
+bloquea toda imputación; se conserva exclusivamente el perfil directo actual,
+su unión global y la procedencia de la muestra actual. No hay imputación selectiva
+ni procedencias mixtas. Las vistas y los enlaces también rechazan antecedentes
+aceptados inconsistentes cuando existe caracterización directa (incluida BLE).
+`0000` expresa ausencia de evidencia positiva, no negatividad demostrada.
+La ventana, los negativos intermedios y la selección histórica no cambian.
+
+Tras actualizar el código instalado, regenerar con `derive-pcr --rebuild` como
+se indica arriba y repetir `export-downstream` para cada formato afectado.
+La regeneración real requiere autorización y no forma parte de los tests sintéticos.
+
+Comandos para el operador autorizado (sustituir URL y destino):
+
+```bash
+fis-data init-db --db-url '<URL_POSTGRESQL>'
+fis-data derive-pcr --db-url '<URL_POSTGRESQL>' --algorithm-version melting-v1 --rebuild --previous-sample-max-days 90 --previous-sample-max-negatives 3
+fis-data export-downstream --db-url '<URL_POSTGRESQL>' --format paper-analysis --output /ruta/conciliacion.xlsx
+fis-data export-downstream --db-url '<URL_POSTGRESQL>' --format analytical-core-tables --output /ruta/tablas.xlsx
+```
+
+Conservar los límites de la derivación anterior si difieren de este ejemplo.
+La validación de los 89 registros requiere una nueva derivación clínica.

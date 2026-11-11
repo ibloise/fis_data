@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .etl.pcr.analytics.sil_linking import direct_characterization_exists_sql
+
 import json
 from typing import Any
 
@@ -1872,14 +1874,22 @@ def create_views(engine: Engine) -> None:
                    candidate.days_difference, candidate.negative_count,
                    retrospective.evidence_status,
                    retrospective.matched_microorganism_code,
-                   COALESCE(evidence.sample_number, candidate_evidence.sample_number) AS result_sample,
-                   COALESCE(evidence.received_at, evidence.entered_at,
+                   COALESCE(direct_sample.sample_number, evidence.sample_number, candidate_evidence.sample_number) AS result_sample,
+                   COALESCE(direct_sample.received_at, direct_sample.entered_at,
+                            evidence.received_at, evidence.entered_at,
                             candidate_evidence.received_at, candidate_evidence.entered_at) AS result_entry_date,
-                   CASE WHEN link.link_type='DIRECT' THEN TRUE
+                   CASE WHEN direct_sample.sample_id IS NOT NULL THEN TRUE
+                        WHEN link.link_type='DIRECT' THEN TRUE
                         WHEN link.link_type='PRIOR_COMPATIBLE' THEN FALSE
                         ELSE NULL END AS result_itself
             FROM pcr_sil_result_link AS link
             JOIN pcr_sample AS sample ON sample.pcr_sample_id=link.pcr_sample_id
+            LEFT JOIN pcr_sil_culture_marker_summary AS direct_culture
+              ON direct_culture.derivation_id=link.derivation_id
+             AND direct_culture.pcr_sample_id=link.pcr_sample_id
+             AND {direct_characterization_exists_sql("link")}
+            LEFT JOIN microb_sample AS direct_sample
+              ON direct_sample.sample_id=direct_culture.microb_sample_id
             LEFT JOIN pcr_sil_link_candidate AS candidate
               ON candidate.candidate_id=link.candidate_id
             LEFT JOIN pcr_sil_retrospective_evidence AS retrospective
@@ -1952,6 +1962,7 @@ def create_views(engine: Engine) -> None:
                  AND candidate.candidate_status='ACCEPTED'
                 WHERE retrospective.derivation_id=({current})
                   AND retrospective.evidence_status='ACCEPTED'
+                  AND NOT {direct_characterization_exists_sql('retrospective')}
                 GROUP BY retrospective.pcr_sample_id, evidence.sample_number,
                          evidence.received_at, evidence.entered_at
             ), resolved AS (
@@ -2118,6 +2129,7 @@ def create_views(engine: Engine) -> None:
                   ON evidence.derivation_id=organism.derivation_id
                  AND evidence.pcr_sample_id=organism.pcr_sample_id
                  AND evidence.current_microb_sample_id=organism.microb_sample_id
+                 AND NOT {direct_characterization_exists_sql("organism")}
                 LEFT JOIN pcr_sil_link_candidate AS candidate
                   ON candidate.derivation_id=organism.derivation_id
                  AND candidate.pcr_sample_id=organism.pcr_sample_id

@@ -209,10 +209,12 @@ def model():
                 [int(any(flags[i] for flags in direct.values())) for i in range(4)],
             )
 
-    def run():
+    def run(before_reconciliation=None):
         # Classification is seeded above. Execute actual search, empty-result
         # audit, candidate generation and PCR reconciliation SQL.
         for query in queries[1:]:
+            if query == queries[-1] and before_reconciliation is not None:
+                before_reconciliation(db)
             db.execute(compatible(query), params)
         organism_sql = views["v_downstream_sil_pcr_organism"]
         resolved = cte(organism_sql, "resolved_organism")
@@ -310,6 +312,11 @@ def model():
             assert global_resolved[key] == int(
                 any(value[index] == "1" for value in profiles.values())
             )
+        global_profile = "".join(str(global_resolved[key]) for key in (
+            "oxa_detected", "vim_detected", "kpc_detected", "ndm_detected"
+        )) if global_resolved["has_prior"] or any(global_resolved[k] for k in ("oxa_detected", "vim_detected", "kpc_detected", "ndm_detected")) else None
+        if global_resolved["has_direct"]:
+            assert global_resolved["result_sample"] == "100"
         links = {
             row["canonical_target"]: row["link_type"]
             for row in db.execute("SELECT * FROM pcr_sil_result_link")
@@ -429,11 +436,11 @@ def test_direct_profile_is_used_when_no_search_applies(model):
     assert links["OXA48"] == "DIRECT"
 
 
-def test_original_characterized_organism_can_select_the_single_prior_sample(model):
+def test_original_characterized_organism_blocks_prior_sample(model):
     model.sample(100, "2026-01-31 00:00:00", [(1, "K", [("OXA", "P")]), (2, "E", [])])
     model.sample(90, "2026-01-25 00:00:00", [(3, "K", [("KPC", "P")])])
     model.sample(80, "2026-01-20 00:00:00", [(4, "E", [("VIM", "P")])])
-    assert model.run()[:2] == ({"K": "0010", "E": "0000"}, "0010")
+    assert model.run()[:2] == ({"K": "1000", "E": "0000"}, "1000")
     # Historical resolution does not overwrite direct observations.
     assert (
         model.db.execute(
@@ -457,3 +464,51 @@ def test_negative_limit_still_stops_retrospective_search(model):
     model.sample(90, "2026-01-25 00:00:00", [])
     model.sample(80, "2026-01-20 00:00:00", [(2, "K", [("OXA", "P")])])
     assert model.run()[:2] == ({"K": "0000"}, None)
+
+
+@pytest.mark.parametrize("markers,expected", [
+    ([("BLE", "P")], "0000"),
+    ([("OXA", "P")], "1000"),
+    ([("KPC", "P"), ("VIM", "P")], "0110"),
+])
+def test_characterization_blocks_all_candidates(model, markers, expected):
+    model.sample(100, "2026-01-31 00:00:00", [(1, "K", markers), (2, "E", [])])
+    model.sample(90, "2026-01-25 00:00:00", [(3, "K", [("NDM", "P")]), (4, "E", [("VIM", "P")])])
+    profiles, _, links = model.run()
+    assert profiles == {"K": expected, "E": "0000"}
+    assert "PRIOR_COMPATIBLE" not in links.values()
+    assert model.db.execute("SELECT COUNT(*) FROM pcr_sil_link_candidate").fetchone()[0] == 0
+    assert model.db.execute("SELECT COUNT(*) FROM pcr_sil_retrospective_evidence WHERE evidence_status='ACCEPTED'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("category", ["CULTURE_NEGATIVE", "CULTURE_NOT_PROCESSED"])
+def test_nonpositive_culture_never_searches(model, category):
+    model.sample(100, "2026-01-31 00:00:00", [(1, "K", [])])
+    model.sample(90, "2026-01-25 00:00:00", [(2, "K", [("OXA", "P")])])
+    model.db.execute("UPDATE pcr_sil_culture_classification SET culture_category=?", (category,))
+    assert model.run()[0] == {"K": "0000"}
+    assert model.db.execute("SELECT COUNT(*) FROM pcr_sil_link_candidate").fetchone()[0] == 0
+
+
+def test_multiple_direct_isolates_preserve_union(model):
+    model.sample(100, "2026-01-31 00:00:00", [(1, "K", [("OXA", "P")]), (2, "E", [("VIM", "P")])])
+    model.sample(90, "2026-01-25 00:00:00", [(3, "K", [("KPC", "P")])])
+    profiles, global_profile, links = model.run()
+    assert profiles == {"K": "1000", "E": "0100"}
+    assert global_profile == "1100"
+    assert links["OXA48"] == links["VIM"] == "DIRECT"
+
+
+@pytest.mark.parametrize("marker", ["BLE", "OXA"])
+def test_inconsistent_accepted_history_cannot_override_direct(model, marker):
+    model.sample(100, "2026-01-31 00:00:00", [(1, "K", [(marker, "P")]), (2, "E", [])])
+    model.sample(90, "2026-01-25 00:00:00", [(3, "K", [("KPC", "P")])])
+
+    def inject(db):
+        db.execute("UPDATE pcr_sil_retrospective_evidence SET evidence_status='ACCEPTED', evidence_microb_sample_id=90")
+        db.execute("INSERT INTO pcr_sil_link_candidate VALUES (1, 1, 100, 1, 'K', 90, 3, 'KPC', 'PRIOR', 'ACCEPTED', 6, 0, 'test', 'inconsistent fixture', '{}')")
+
+    profiles, _, links = model.run(before_reconciliation=inject)
+    assert profiles == {"K": "1000" if marker == "OXA" else "0000", "E": "0000"}
+    assert links["KPC"] == "NO_EVIDENCE"
+    assert "PRIOR_COMPATIBLE" not in links.values()

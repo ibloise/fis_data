@@ -28,7 +28,10 @@ from .models import (
     TargetQCEvidence,
     WellClassification,
 )
-from .sil_linking import IRRELEVANT_MICROORGANISM_PATTERN
+from .sil_linking import (
+    IRRELEVANT_MICROORGANISM_PATTERN,
+    direct_characterization_exists_sql,
+)
 
 RULE_VERSION = "1.0"
 
@@ -407,8 +410,8 @@ class PCRAnalyticsRepository:
         """Resolve one culture-level SIL profile for each eligible PCR sample.
 
         Direct evidence is the binary union of the current culture's relevant
-        isolates.  When an uncharacterized current isolate starts a historical
-        search, the first compatible prior sample found for *any* current
+        isolates.  When all relevant current isolates lack characterization,
+        a historical search starts and the first compatible prior sample found for *any* current
         organism becomes the sole retrospective evidence sample. Only markers
         attached to exact current organism codes are inherited. An unmatched
         current organism stays 0000; it never starts another search.
@@ -545,7 +548,8 @@ class PCRAnalyticsRepository:
                     SELECT DISTINCT pcr_sample_id, current_sample_id, patient_id, current_at
                     FROM current_organisms
                     WHERE patient_id IS NOT NULL AND current_at IS NOT NULL
-                      AND is_uncharacterized
+                    GROUP BY pcr_sample_id, current_sample_id, patient_id, current_at
+                    HAVING MIN(CASE WHEN is_uncharacterized THEN 1 ELSE 0 END)=1
                 ), previous_samples AS (
                     SELECT seeds.pcr_sample_id, seeds.current_sample_id,
                            previous.sample_id AS previous_sample_id,
@@ -814,6 +818,7 @@ class PCRAnalyticsRepository:
                     LEFT JOIN pcr_sil_retrospective_evidence AS evidence
                       ON evidence.derivation_id=selections.derivation_id
                      AND evidence.pcr_sample_id=selections.pcr_sample_id
+                     AND NOT {direct_characterization_exists_sql("selections")}
                 )
                 INSERT INTO pcr_sil_result_link (
                     derivation_id, pcr_sample_id, run_type, canonical_target, candidate_id,
