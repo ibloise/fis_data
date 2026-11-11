@@ -545,3 +545,20 @@ def test_link_export_provenance_depends_on_evidence_not_concordance(model, link_
             (direct_id, link_type, "ACCEPTED" if accepted else "NO_EVIDENCE"),
         ).fetchone()
         assert row["result_itself"] == int(direct_id is not None or not accepted)
+
+
+@pytest.mark.parametrize("result_sample,expected", [("100", "S-current"), ("90", "S-prior"), ("80", None)])
+def test_export_result_sample_pseudonym_follows_evidence_sample(model, result_sample, expected):
+    model.db.executescript("""
+        CREATE TABLE pseudonym_sample_registry (source_identifier, pseudonym);
+        INSERT INTO pseudonym_sample_registry VALUES ('100', 'S-current'), ('90', 'S-prior');
+    """)
+    view = model.views["v_downstream_sil_pcr_global"]
+    expression = re.search(r"\(SELECT pseudonym FROM pseudonym_sample_registry.*? AS result_sample_pseudonym", view, re.S).group(0)
+    row = model.db.execute(
+        "SELECT " + expression + " FROM (SELECT ? AS result_sample) AS resolved",
+        (result_sample,),
+    ).fetchone()
+    assert row["result_sample_pseudonym"] == expected
+    assert "AS result_sample_pseudonym" in model.views["v_pcr_sil_result_link"]
+    assert "summary.result_sample_pseudonym" in model.views["v_downstream_pcr_sil_target"]

@@ -235,3 +235,8 @@ En las vistas downstream, `result_itself` es siempre booleano: `false` si
 se utiliza una muestra histórica aceptada y `true` si se utiliza la muestra
 actual, incluidos cultivos negativos, no procesados o sin resumen de marcadores.
 Este indicador expresa procedencia, no positividad ni validez del resultado.
+
+`result_sample_pseudonym` acompaña a `result_sample` en la exportación e
+identifica la misma muestra de evidencia (actual o histórica) mediante el
+registro de pseudónimos. Si esa muestra no tiene pseudónimo registrado, queda
+vacío; nunca se sustituye por el pseudónimo de otra muestra.

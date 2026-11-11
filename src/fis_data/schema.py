@@ -1877,6 +1877,8 @@ def create_views(engine: Engine) -> None:
                    retrospective.evidence_status,
                    retrospective.matched_microorganism_code,
                    COALESCE(direct_sample.sample_number, evidence.sample_number, candidate_evidence.sample_number, current_sample.sample_number) AS result_sample,
+                   (SELECT pseudonym FROM pseudonym_sample_registry
+                    WHERE source_identifier=COALESCE(direct_sample.sample_number, evidence.sample_number, candidate_evidence.sample_number, current_sample.sample_number)) AS result_sample_pseudonym,
                    COALESCE(direct_sample.received_at, direct_sample.entered_at,
                             evidence.received_at, evidence.entered_at,
                             candidate_evidence.received_at, candidate_evidence.entered_at,
@@ -2007,7 +2009,10 @@ def create_views(engine: Engine) -> None:
                    COALESCE(resolved.kpc_detected, FALSE)::int AS kpc,
                    COALESCE(resolved.ndm_detected, FALSE)::int AS ndm,
                    (COALESCE(resolved.oxa_detected, FALSE)::int::text || COALESCE(resolved.vim_detected, FALSE)::int::text || COALESCE(resolved.kpc_detected, FALSE)::int::text || COALESCE(resolved.ndm_detected, FALSE)::int::text) AS global_encoded,
-                   resolved.result_sample, resolved.result_entry_date,
+                   resolved.result_sample,
+                   (SELECT pseudonym FROM pseudonym_sample_registry
+                    WHERE source_identifier=resolved.result_sample) AS result_sample_pseudonym,
+                   resolved.result_entry_date,
                    CASE WHEN resolved.has_prior THEN FALSE ELSE TRUE END AS result_itself,
                    origin.code AS origin_code, service.code AS service_code,
                    service.description AS desc_service, origin.description AS desc_proc,
@@ -2195,7 +2200,7 @@ def create_views(engine: Engine) -> None:
                    target.sil_result, target.direct_sil_result,
                    target.log_delta, summary.pcr_category,
                    summary.result_interpretate AS culture_category,
-                   summary.result_itself,
+                   summary.result_itself, summary.result_sample_pseudonym,
                    link.link_type, link.concordance AS sil_concordance,
                    link.policy_version AS sil_policy_version,
                    link.reason AS sil_link_reason
