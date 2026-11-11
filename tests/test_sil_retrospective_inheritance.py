@@ -512,3 +512,20 @@ def test_inconsistent_accepted_history_cannot_override_direct(model, marker):
     assert profiles == {"K": "1000" if marker == "OXA" else "0000", "E": "0000"}
     assert links["KPC"] == "NO_EVIDENCE"
     assert "PRIOR_COMPATIBLE" not in links.values()
+
+
+@pytest.mark.parametrize("category", ["CULTURE_POSITIVE", "CULTURE_NEGATIVE", "CULTURE_NOT_PROCESSED"])
+def test_export_provenance_is_current_without_marker_summary(model, category):
+    model.sample(100, "2026-01-31 00:00:00", [(1, "K", [])])
+    model.db.execute("UPDATE pcr_sil_culture_classification SET culture_category=?", (category,))
+    model.db.execute("DELETE FROM pcr_sil_culture_marker_summary")
+    view = model.views["v_downstream_sil_pcr_global"]
+    expression = re.search(r"CASE WHEN resolved.has_prior.*? AS result_itself", view).group(0)
+    for has_prior, expected in [(0, 1), (1, 0), (None, 1)]:
+        row = model.db.execute(
+            "SELECT " + expression + " FROM (SELECT ? AS has_prior, 0 AS has_direct) AS resolved",
+            (has_prior,),
+        ).fetchone()
+        assert row["result_itself"] == expected
+    assert "summary.result_itself" in model.views["v_downstream_pcr_sil_target"]
+    assert "summary_global.*" in model.views["v_downstream_sil_pcr_organism"]

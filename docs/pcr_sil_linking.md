@@ -230,3 +230,8 @@ fis-data export-downstream --db-url '<URL_POSTGRESQL>' --format analytical-core-
 
 Conservar los límites de la derivación anterior si difieren de este ejemplo.
 La validación de los 89 registros requiere una nueva derivación clínica.
+
+En las vistas downstream, `result_itself` es siempre booleano: `false` si
+se utiliza una muestra histórica aceptada y `true` si se utiliza la muestra
+actual, incluidos cultivos negativos, no procesados o sin resumen de marcadores.
+Este indicador expresa procedencia, no positividad ni validez del resultado.

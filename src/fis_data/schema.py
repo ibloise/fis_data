@@ -2003,7 +2003,7 @@ def create_views(engine: Engine) -> None:
                    COALESCE(resolved.ndm_detected, FALSE)::int AS ndm,
                    (COALESCE(resolved.oxa_detected, FALSE)::int::text || COALESCE(resolved.vim_detected, FALSE)::int::text || COALESCE(resolved.kpc_detected, FALSE)::int::text || COALESCE(resolved.ndm_detected, FALSE)::int::text) AS global_encoded,
                    resolved.result_sample, resolved.result_entry_date,
-                   CASE WHEN resolved.has_prior THEN FALSE WHEN resolved.has_direct THEN TRUE ELSE NULL END AS result_itself,
+                   CASE WHEN resolved.has_prior THEN FALSE ELSE TRUE END AS result_itself,
                    origin.code AS origin_code, service.code AS service_code,
                    service.description AS desc_service, origin.description AS desc_proc,
                    patient.sex, patient.birth_date,
