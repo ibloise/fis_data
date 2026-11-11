@@ -240,3 +240,8 @@ Este indicador expresa procedencia, no positividad ni validez del resultado.
 identifica la misma muestra de evidencia (actual o histórica) mediante el
 registro de pseudónimos. Si esa muestra no tiene pseudónimo registrado, queda
 vacío; nunca se sustituye por el pseudónimo de otra muestra.
+
+Después de derivar PCR, ejecutar `fis-data pseudonymize` antes de exportar.
+También registra las muestras históricas aceptadas de las muestras PCR
+elegibles actuales, aunque el antecedente no tenga PCR propio. Conserva las
+asignaciones existentes y añade únicamente los identificadores que faltan.

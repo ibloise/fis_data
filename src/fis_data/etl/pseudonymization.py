@@ -14,6 +14,7 @@ from ..schema import (
     pcr_derivation_run,
     pcr_microb_well_validation,
     pcr_sample_result,
+    pcr_sil_retrospective_evidence,
     pcr_sample_scope_gate,
     pseudonym_sample_registry,
     pseudonym_patient_registry,
@@ -47,6 +48,7 @@ class PseudonymizationRepository:
             )).inserted_primary_key[0]
             valid_facts = conn.execute(
                 select(
+                    pcr_sample_result.c.pcr_sample_id,
                     microb_sample.c.source_id,
                     microb_patient.c.nhc,
                     microb_sample.c.sample_number,
@@ -103,6 +105,28 @@ class PseudonymizationRepository:
                 for row in valid_facts
                 if row.sample_number is not None and str(row.sample_number).strip()
             ]
+            # Prior evidence samples need stable identities even when they have
+            # no PCR result of their own. Keep the same eligible current scope.
+            eligible_ids = sorted({row.pcr_sample_id for row in valid_facts})
+            if eligible_ids:
+                evidence_samples = conn.execute(
+                    select(microb_sample.c.source_id, microb_sample.c.sample_number)
+                    .select_from(pcr_sil_retrospective_evidence)
+                    .join(pcr_derivation_run,
+                          pcr_derivation_run.c.derivation_id
+                          == pcr_sil_retrospective_evidence.c.derivation_id)
+                    .join(microb_sample, microb_sample.c.sample_id
+                          == pcr_sil_retrospective_evidence.c.evidence_microb_sample_id)
+                    .where(
+                        pcr_derivation_run.c.status == "SUCCESS",
+                        pcr_derivation_run.c.is_current.is_(True),
+                        pcr_sil_retrospective_evidence.c.pcr_sample_id.in_(eligible_ids),
+                        pcr_sil_retrospective_evidence.c.evidence_status == "ACCEPTED",
+                    )
+                    .distinct()
+                ).all()
+                samples.extend((row.source_id, row.sample_number)
+                               for row in evidence_samples)
             patient_count = self._assign_kind(
                 conn, "PATIENT", patients, pseudonym_patient_registry, "P",
                 progress_name="patients", on_progress=on_progress,

@@ -11,6 +11,7 @@ from fis_data.schema import (
     pcr_microb_well_validation,
     pcr_sample,
     pcr_sample_result,
+    pcr_sil_retrospective_evidence,
     pcr_sample_scope_gate,
     pseudonym_patient_registry,
     pseudonym_sample_registry,
@@ -233,3 +234,39 @@ def test_pseudonymize_cli_shows_count_only_progress(tmp_path, monkeypatch) -> No
     assert "000045" not in result.output
     assert '"patients_added": 1' in result.output
     assert '"samples_added": 1' in result.output
+
+
+def test_prior_evidence_without_pcr_gets_stable_pseudonym(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'evidence.sqlite'}")
+    create_schema(engine)
+    with engine.begin() as conn:
+        source = conn.execute(insert(ctl_source).values(
+            source_name="SYNTHETIC", source_type="test"
+        )).inserted_primary_key[0]
+        _add_valid_fact(conn, source, "patient", "current")
+    repository = PseudonymizationRepository(engine)
+    repository.assign_normalized_microb()
+    with engine.begin() as conn:
+        before = dict(conn.execute(select(
+            pseudonym_sample_registry.c.source_identifier,
+            pseudonym_sample_registry.c.pseudonym,
+        )).all())
+        prior = conn.execute(insert(microb_sample).values(
+            source_id=source, sample_number="historical"
+        )).inserted_primary_key[0]
+        fact = conn.execute(select(pcr_microb_well_validation)).mappings().one()
+        conn.execute(insert(pcr_sil_retrospective_evidence).values(
+            derivation_id=fact["derivation_id"], pcr_sample_id=fact["pcr_sample_id"],
+            current_microb_sample_id=fact["microb_sample_id"],
+            evidence_microb_sample_id=prior, evidence_status="ACCEPTED",
+            policy_version="test", reason="synthetic", details_json="{}",
+        ))
+    assert repository.assign_normalized_microb() == {"patients_added": 0, "samples_added": 1}
+    assert repository.assign_normalized_microb() == {"patients_added": 0, "samples_added": 0}
+    with engine.connect() as conn:
+        after = dict(conn.execute(select(
+            pseudonym_sample_registry.c.source_identifier,
+            pseudonym_sample_registry.c.pseudonym,
+        )).all())
+    assert after["current"] == before["current"]
+    assert after["historical"] != after["current"]
