@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ...json_utils import loads_json
+from ..microb.taxonomy import NORMALIZATION_VERSION, validate_microorganism_coverage
 
 @dataclass(frozen=True)
 class ExportSheet:
@@ -451,6 +452,24 @@ def format_names() -> tuple[str, ...]:
     return tuple(FORMATS)
 
 
+def _export_columns(format_name: str, columns: list[str]) -> list[str]:
+    """Keep the paper's raw organism label and publication group together."""
+
+    if format_name != PAPER_ANALYSIS.name:
+        return columns
+    columns = [column for column in columns if column not in {
+        "microorg_scientific_name", "microorg_group_code",
+    }]
+    organism_fields = [column for column in (
+        "microorg_code", "microorg_name", "microorg_group_name",
+    ) if column in columns]
+    if organism_fields:
+        position = min(columns.index(column) for column in organism_fields)
+        columns = [column for column in columns if column not in organism_fields]
+        columns[position:position] = organism_fields
+    return columns
+
+
 def downstream_schema(engine: Engine, *, format_name: str) -> dict[str, object]:
     """Describe export worksheet columns without fetching any data rows."""
 
@@ -471,7 +490,7 @@ def downstream_schema(engine: Engine, *, format_name: str) -> dict[str, object]:
             ))
             sheets.append({
                 "name": definition.name,
-                "columns": list(result.keys()),
+                "columns": _export_columns(format_name, list(result.keys())),
                 "query": definition.query.strip(),
             })
 
@@ -514,6 +533,8 @@ def export_downstream(
     report("Connecting to the database.")
     with engine.connect() as conn:
         if format_name in {PAPER_ANALYSIS.name, ANALYTICAL_CORE_TABLES.name}:
+            report("Validating microorganism normalization coverage.")
+            validate_microorganism_coverage(conn)
             report("Checking pseudonym coverage on validated matched samples.")
             has_missing = conn.execute(text(
                 """
@@ -559,7 +580,9 @@ def export_downstream(
             report(f"Executing query for sheet '{definition.name}'.")
             worksheet = workbook.create_sheet(title=definition.name)
             result = conn.execute(text(definition.query))
-            headers = list(result.keys())
+            source_headers = list(result.keys())
+            headers = _export_columns(format_name, source_headers)
+            column_indices = [source_headers.index(header) for header in headers]
             worksheet.append(headers)
             report(
                 f"Query opened for '{definition.name}' "
@@ -567,7 +590,7 @@ def export_downstream(
             )
             count = 0
             for row in result:
-                worksheet.append([_xlsx_value(value) for value in row])
+                worksheet.append([_xlsx_value(row[index]) for index in column_indices])
                 count += 1
                 if count % 10000 == 0:
                     report(f"Sheet '{definition.name}': {count:,} rows written.")
@@ -606,6 +629,8 @@ def _write_report_sheet(workbook: Workbook, conn, export_format: ExportFormat) -
     worksheet.append(["generated_at_utc", datetime.now(timezone.utc).isoformat()])
     worksheet.append(["export_format", export_format.name])
     worksheet.append(["export_description", export_format.description])
+    if export_format.name in {PAPER_ANALYSIS.name, ANALYTICAL_CORE_TABLES.name}:
+        worksheet.append(["microorganism_normalization_version", NORMALIZATION_VERSION])
     if row is None:
         worksheet.append(["derivation_status", "No current successful derivation."])
         return

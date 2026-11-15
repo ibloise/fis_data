@@ -31,6 +31,10 @@ from .etl.microb.catalogs import MicrobCatalogRepository
 from .etl.microb.normalization import MicrobNormalizer
 from .etl.microb.parse_job import MicrobParseJob
 from .etl.microb.staging_job import MicrobStagingJob
+from .etl.microb.taxonomy import (
+    load_microorganism_dimension,
+    validate_microorganism_coverage,
+)
 from .etl.pcr.analytics import PCRAnalyticsJob
 from .etl.pcr.analytics.patient_episodes import PatientEpisodeJob
 from .etl.pcr.analytics.sil_linking import SILLinkingPolicy
@@ -815,6 +819,42 @@ def derive_pcr(
     click.echo(json.dumps(details, ensure_ascii=False, indent=2))
 
 
+@cli.command("load-microorganism-dimension")
+@click.option("--db-url", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+def load_microorganism_dimension_command(db_url: str | None) -> None:
+    """Create/update the descriptive study dimension from its versioned CSV."""
+
+    engine = _engine_for_db_url(db_url)
+    create_schema(engine)
+    stats = load_microorganism_dimension(engine)
+    if stats["catalog_description_differences"]:
+        click.echo(
+            "WARNING: Current microorg descriptions differ from study labels; "
+            "the dictionary was not changed. See catalog_description_differences.",
+            err=True,
+        )
+    if not stats["catalog_compared"]:
+        click.echo(
+            "WARNING: No current microorg catalog available for comparison.",
+            err=True,
+        )
+    click.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+@cli.command("validate-microorganism-normalization")
+@click.option("--db-url", help="PostgreSQL SQLAlchemy URL (overrides FIS_DATA_DB_*).")
+def validate_microorganism_normalization_command(db_url: str | None) -> None:
+    """Check normalization coverage of the current downstream study cohort."""
+
+    engine = _engine_for_db_url(db_url)
+    try:
+        with engine.connect() as conn:
+            stats = validate_microorganism_coverage(conn)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
 @cli.command("export-downstream")
 @click.option(
     "--db-url", "db_path",
@@ -861,12 +901,15 @@ def export_downstream_command(
         return
 
     on_progress = (lambda message: click.echo(message, err=True)) if verbose else None
-    counts = export_downstream(
-        engine,
-        format_name=format_name,
-        output_path=output_path,
-        on_progress=on_progress,
-    )
+    try:
+        counts = export_downstream(
+            engine,
+            format_name=format_name,
+            output_path=output_path,
+            on_progress=on_progress,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({"format": format_name, "output": str(output_path), "rows": counts}, ensure_ascii=False, indent=2))
 
 

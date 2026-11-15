@@ -290,6 +290,21 @@ fis-data export-downstream --format paper-analysis \
   --output paper_analysis.xlsx
 ```
 
+Antes de la primera exportación con normalización taxonómica, carga el
+diccionario versionado y comprueba su cobertura:
+
+```bash
+fis-data load-microorganism-dimension
+fis-data validate-microorganism-normalization
+```
+
+La carga es idempotente. Los formatos analíticos rechazan códigos SIL sin
+correspondencia. `paper-analysis` presenta juntos el código SIL, el nombre
+original y `microorg_group_name`; `analytical-core-tables` incluye además
+`microorg_scientific_name` y `microorg_group_code`. Consulta el
+[modelo downstream](docs/downstream-model.md#normalización-de-microorganismos-para-publicación)
+para actualizar una base existente y revisar diferencias con el catálogo.
+
 Build the audited longitudinal patient episodes from the current successful
 PCR derivation. The default maximum gap between consecutive samples is 30
 calendar days; a gap equal to the limit stays within the same episode:

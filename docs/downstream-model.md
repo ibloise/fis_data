@@ -36,6 +36,111 @@ Las operaciones que reciben `--db-url` aceptan el URL SQLAlchemy de PostgreSQL;
 si se omite, usan la configuración `FIS_DATA_DB_*`. Los ejemplos completos de
 conexión y preparación están en el [README](../README.md).
 
+## Normalización de microorganismos para publicación
+
+La dimensión `dim_microb_microorganism` añade etiquetas descriptivas al estudio.
+No sustituye al catálogo Microb original ni a la identificación del aislado:
+
+| Elemento | Función |
+|---|---|
+| `ref_microb_catalog` / `ref_microb_catalog_entry` | Referencias originales versionadas; el catálogo `microorg` conserva las descripciones SIL. |
+| `microb_isolate.microorganism_id` / `microorganism_code` | Identificación original del aislado, sin modificaciones. La FK apunta a una versión concreta del catálogo. |
+| `dim_microb_microorganism.scientific_name` | Nombre científico normalizado, almacenado como texto plano. |
+| `analysis_group_code` / `analysis_group_name` | Identificador estable y denominación del grupo usado en tablas y figuras. |
+
+La clave primaria de la dimensión es `microorganism_code VARCHAR(32)`, textual
+y sensible a mayúsculas/minúsculas. No se usa el ID de una versión del catálogo
+como clave. Los grupos tienen códigos explícitos con el género completo, por
+ejemplo `ENTEROBACTER_CLOACAE_COMPLEX`.
+
+La única fuente del diccionario es
+[`microorganism-normalization-v1.csv`](../src/fis_data/resources/microorganism-normalization-v1.csv),
+incluida como recurso del paquete Python. Contiene exactamente 28 códigos,
+26 nombres científicos y 24 grupos analíticos. `observed_name` conserva la
+etiqueta suministrada para comprobar diferencias con el catálogo vigente;
+no sustituye su descripción ni se copia sobre las referencias originales.
+`normalization_note` explica las decisiones que precisan contexto.
+
+### Carga y actualización de una base existente
+
+Con el código actualizado y la conexión habitual configurada:
+
+```bash
+fis-data load-microorganism-dimension
+fis-data validate-microorganism-normalization
+fis-data export-downstream --format paper-analysis --output paper_analysis.xlsx
+```
+
+Los tres comandos aceptan `--db-url` para especificar otra conexión PostgreSQL.
+La carga crea/actualiza el esquema y las vistas mediante `create_schema` y
+realiza un upsert transaccional de las 28 entradas del CSV. Se puede repetir
+sin duplicaciones; restaura las etiquetas versionadas si se han alterado.
+No edites manualmente la dimensión en producción. Para futuras correcciones,
+versiona un nuevo recurso y actualiza `NORMALIZATION_VERSION`, sus pruebas y
+esta documentación. No se necesitan dependencias nuevas ni servicios externos.
+
+La carga compara las etiquetas observadas con las descripciones del catálogo
+`microorg` vigente, devuelve `catalog_description_differences` y emite una
+advertencia si difieren. También comunica si no hay catálogo disponible o si
+faltan códigos del diccionario en él. Nunca modifica automáticamente el
+diccionario a partir de esas diferencias. Esta implementación se ha validado
+solo con datos sintéticos; no confirma descripciones ni recuentos de una base
+desplegada.
+
+### Vistas, cobertura y compatibilidad
+
+`v_downstream_sil_pcr_organism` incorpora la dimensión mediante `LEFT JOIN`
+por código original, con una única fila de dimensión por código. Conserva
+`microorg_code`, `microorg_name`, todos los campos anteriores y su granularidad.
+Añade `microorg_scientific_name`, `microorg_group_code` y `microorg_group_name`.
+Los tres campos también se propagan a `v_downstream_sil_organism_target` y
+`v_downstream_sil_organism_profile`. En las hojas `SIL PCR organisms`,
+`SIL organism targets` y `SIL organism profiles`, `analytical-core-tables`
+exporta los tres campos. `paper-analysis` presenta juntos `microorg_code`,
+`microorg_name` (original SIL) y `microorg_group_name`; omite el nombre científico
+y el código de grupo. Esta selección y orden también se reflejan en `--mode schema`.
+La exportación no sustituye las etiquetas almacenadas en la base. No se crean
+hojas nuevas. El informe del Excel identifica `microorganism-normalization-v1`.
+
+Ejemplo de las etiquetas añadidas:
+
+| microorg_code | microorg_scientific_name | microorg_group_code | microorg_group_name |
+|---|---|---|---|
+| `2003` | Enterobacter cloacae | ENTEROBACTER_CLOACAE_COMPLEX | Enterobacter cloacae complex |
+| `2009` | Enterobacter hormaechei | ENTEROBACTER_CLOACAE_COMPLEX | Enterobacter cloacae complex |
+| `19026` | Enterobacter roggenkampii | ENTEROBACTER_CLOACAE_COMPLEX | Enterobacter cloacae complex |
+| `2030` | Proteus mirabilis | PROTEUS_MIRABILIS | Proteus mirabilis |
+
+La validación informa de los códigos y filas con microorganismo de la cohorte
+actual, sus especies/grupos cubiertos y los códigos de la dimensión. Tanto
+`paper-analysis` como `analytical-core-tables` fallan explícitamente antes de
+escribir el Excel si encuentran un código no nulo sin correspondencia. La vista
+mantiene esas filas con etiquetas normalizadas nulas para poder diagnosticarlas.
+Un `microorg_code NULL`, válido para cultivos sin microorganismo, no provoca un
+error ni elimina la fila. No hay grupo genérico de respaldo.
+
+Para el universo completo suministrado se esperan 28 códigos cubiertos,
+26 nombres, 24 grupos y cero códigos sin correspondencia; las 2.612 filas con
+microorganismo son un recuento esperado del estudio, no una restricción impuesta
+a cualquier subconjunto analítico. El comando informa del recuento real cuando
+se ejecuta sobre la base autorizada.
+
+Los nombres/grupos nuevos solo son etiquetas: no alteran resistencias, BLEE,
+perfiles OXA-48/VIM/KPC/NDM, selección de pacientes/muestras/episodios, búsqueda
+retrospectiva ni asignación de ST. Eliminar «BLEE» del nombre de `2030` no
+infiere ni modifica ningún resultado de resistencia. Las reglas clínicas siguen
+comparando códigos SIL originales, nunca nombres normalizados ni grupos.
+Los ST deben analizarse a nivel de especie; pertenecer al complejo
+*Enterobacter cloacae* no autoriza comparabilidad de ST ni transferencia de
+carbapenemasas entre sus especies.
+
+Compatibilidad: actualiza las vistas y carga la dimensión antes de exportar.
+Las columnas previas se mantienen; consumidores que exijan un número u orden
+exacto de columnas deben adaptarse al formato elegido: el paper añade solo el
+nombre de grupo junto al nombre original y el formato completo añade los tres
+campos normalizados. La cursiva se aplica únicamente en las tablas/figuras del
+manuscrito.
+
 ## Registro persistente de pseudónimos
 
 ### Identidad y estabilidad

@@ -305,6 +305,15 @@ ref_microb_catalog_entry = Table(
 
 # Normalized Microb domain.  The source codes remain in the reference FK
 # columns; staging is retained as the authoritative raw lineage.
+dim_microb_microorganism = Table(
+    "dim_microb_microorganism", metadata,
+    Column("microorganism_code", String(32), primary_key=True),
+    Column("scientific_name", Text, nullable=False),
+    Column("analysis_group_code", String(64), nullable=False),
+    Column("analysis_group_name", Text, nullable=False),
+    Column("normalization_note", Text),
+)
+
 microb_patient = Table(
     "microb_patient", metadata,
     Column("patient_id", Integer, primary_key=True, autoincrement=True),
@@ -2181,11 +2190,16 @@ def create_views(engine: Engine) -> None:
                    COALESCE(organism.kpc_detected, FALSE)::int AS direct_organism_kpc,
                    COALESCE(organism.ndm_detected, FALSE)::int AS direct_organism_ndm,
                    st_by_organism.st,
-                   direct_evidence.direct_organism_blee
+                   direct_evidence.direct_organism_blee,
+                   taxonomy.scientific_name AS microorg_scientific_name,
+                   taxonomy.analysis_group_code AS microorg_group_code,
+                   taxonomy.analysis_group_name AS microorg_group_name
             FROM v_downstream_sil_pcr_global AS summary_global
             JOIN pcr_sample AS pcr_sample ON pcr_sample.sample_key=summary_global.sample
             LEFT JOIN pcr_sil_organism_marker_summary AS organism
               ON organism.derivation_id=({current}) AND organism.pcr_sample_id=pcr_sample.pcr_sample_id
+            LEFT JOIN dim_microb_microorganism AS taxonomy
+              ON taxonomy.microorganism_code=organism.microorganism_code
             LEFT JOIN v_pcr_sil_organism_marker_summary AS direct_evidence
               ON direct_evidence.sample_key=pcr_sample.sample_key
              AND direct_evidence.microorganism_code=organism.microorganism_code
@@ -2251,7 +2265,9 @@ def create_views(engine: Engine) -> None:
                    target.canonical_target, target.marker_name,
                    target.organism_result, target.direct_organism_result,
                    organism.isolate_count, organism.st,
-                   organism.direct_organism_blee
+                   organism.direct_organism_blee,
+                   organism.microorg_scientific_name,
+                   organism.microorg_group_code, organism.microorg_group_name
             FROM v_downstream_sil_pcr_organism AS organism
             CROSS JOIN LATERAL (VALUES
                 ('OXA48', 'OXA-48', organism.organism_oxa48, organism.direct_organism_oxa48),
@@ -2267,7 +2283,8 @@ def create_views(engine: Engine) -> None:
                    microorg_name, encoded_carba_org AS reconciled_profile,
                    (direct_organism_oxa48::text || direct_organism_vim::text ||
                     direct_organism_kpc::text || direct_organism_ndm::text) AS direct_profile,
-                   isolate_count, st, direct_organism_blee
+                   isolate_count, st, direct_organism_blee,
+                   microorg_scientific_name, microorg_group_code, microorg_group_name
             FROM v_downstream_sil_pcr_organism
             WHERE microorg_code IS NOT NULL
         """,

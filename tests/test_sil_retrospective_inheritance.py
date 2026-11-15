@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fis_data.etl.microb.taxonomy import read_dictionary
 from fis_data.etl.pcr.analytics.repository import PCRAnalyticsRepository
 from fis_data.schema import create_views
 
@@ -72,6 +73,13 @@ def cte(sql, name):
     raise AssertionError("Unterminated CTE")
 
 
+def test_shared_enterobacter_group_does_not_transfer_markers(model):
+    model.sample(100, "2026-02-01", [(1, "2003", []), (2, "2009", [])])
+    model.sample(90, "2026-01-31", [(3, "2003", [("KPC", "P")])])
+    profiles, _, _ = model.run()
+    assert profiles == {"2003": "0010", "2009": "0000"}
+
+
 @pytest.fixture
 def model():
     db = sqlite3.connect(":memory:")
@@ -126,6 +134,8 @@ def model():
         CREATE TABLE pcr_result_selection (derivation_id, pcr_sample_id, run_type,
                 canonical_target, preferred_interpretation_id);
         CREATE TABLE pcr_interpretation (interpretation_id, call);
+        CREATE TABLE dim_microb_microorganism (microorganism_code TEXT PRIMARY KEY,
+            scientific_name, analysis_group_code, analysis_group_name);
         CREATE TABLE pcr_sil_result_link (derivation_id, pcr_sample_id, run_type,
                 canonical_target,
             candidate_id, link_type, concordance, policy_version, reason, details_json);
@@ -137,6 +147,12 @@ def model():
             (1, 1, 'SPECIFIC', 'OXA48', 1), (1, 1, 'SPECIFIC', 'VIM', 1),
             (1, 1, 'SPECIFIC', 'KPC', 1), (1, 1, 'SPECIFIC', 'NDM', 1);
     """)
+    db.executemany(
+        "INSERT INTO dim_microb_microorganism VALUES (?, ?, ?, ?)",
+        [(row["microorganism_code"], row["scientific_name"],
+          row["analysis_group_code"], row["analysis_group_name"])
+         for row in read_dictionary()],
+    )
     capture = Capture()
     PCRAnalyticsRepository(capture).link_sil_results(
         1, policy_version="test", max_days=30, max_negatives=3
@@ -262,6 +278,8 @@ def model():
             FROM (SELECT 'S1' AS sample_pseudonym, 'P1' AS patient_pseudonym) AS
                 summary_global
             CROSS JOIN pcr_sil_organism_marker_summary AS organism
+            LEFT JOIN dim_microb_microorganism AS taxonomy
+              ON taxonomy.microorganism_code=organism.microorganism_code
             LEFT JOIN resolved_organism
               ON resolved_organism.pcr_sample_id=organism.pcr_sample_id
              AND resolved_organism.current_microb_sample_id=organism.microb_sample_id

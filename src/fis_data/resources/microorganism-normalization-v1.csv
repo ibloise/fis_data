@@ -1,0 +1,29 @@
+microorganism_code,observed_name,scientific_name,analysis_group_code,analysis_group_name,normalization_note
+3001,KLEBSIELLA PNEUMONIAE,Klebsiella pneumoniae,KLEBSIELLA_PNEUMONIAE,Klebsiella pneumoniae,
+5886,Klebsiella pneumoniae ssp pneumoniae,Klebsiella pneumoniae,KLEBSIELLA_PNEUMONIAE,Klebsiella pneumoniae,Subspecies collapsed to species for publication.
+1000,ESCHERICHIA COLI,Escherichia coli,ESCHERICHIA_COLI,Escherichia coli,
+2003,ENTEROBACTER CLOACAE,Enterobacter cloacae,ENTEROBACTER_CLOACAE_COMPLEX,Enterobacter cloacae complex,Analytical complex only; retain original species for mechanisms and ST.
+2009,ENTEROBACTER HORMAECHEI,Enterobacter hormaechei,ENTEROBACTER_CLOACAE_COMPLEX,Enterobacter cloacae complex,Analytical complex only; retain original species for mechanisms and ST.
+19026,Enterobacter roggenkampii,Enterobacter roggenkampii,ENTEROBACTER_CLOACAE_COMPLEX,Enterobacter cloacae complex,Analytical complex only; retain original species for mechanisms and ST.
+4003,CITROBACTER FREUNDII,Citrobacter freundii,CITROBACTER_FREUNDII,Citrobacter freundii,
+4001,CITROBACTER AMALONATICUS,Citrobacter amalonaticus,CITROBACTER_AMALONATICUS,Citrobacter amalonaticus,
+4002,CITROBACTER KOSERI,Citrobacter koseri,CITROBACTER_KOSERI,Citrobacter koseri,
+4005,CITROBACTER BRAAKII,Citrobacter braakii,CITROBACTER_BRAAKII,Citrobacter braakii,
+4006,CITROBACTER FARMERI,Citrobacter farmeri,CITROBACTER_FARMERI,Citrobacter farmeri,
+3002,KLEBSIELLA OXYTOCA,Klebsiella oxytoca,KLEBSIELLA_OXYTOCA,Klebsiella oxytoca,
+KA0CEA,KLEBSIELLA AEROGENES,Klebsiella aerogenes,KLEBSIELLA_AEROGENES,Klebsiella aerogenes,
+KV038C,KLEBSIELLA VARIICOLA,Klebsiella variicola,KLEBSIELLA_VARIICOLA,Klebsiella variicola,
+10002,SERRATIA MARCESCENS,Serratia marcescens,SERRATIA_MARCESCENS,Serratia marcescens,
+16002,PSEUDOMONAS AERUGINOSA,Pseudomonas aeruginosa,PSEUDOMONAS_AERUGINOSA,Pseudomonas aeruginosa,
+16005,PSEUDOMONAS PUTIDA,Pseudomonas putida,PSEUDOMONAS_PUTIDA,Pseudomonas putida,
+PN05D3,PSEUDOMONAS NITROREDUCENS,Pseudomonas nitroreducens,PSEUDOMONAS_NITROREDUCENS,Pseudomonas nitroreducens,
+PM05D1,PSEUDOMONAS MOSSELII,Pseudomonas mosselii,PSEUDOMONAS_MOSSELII,Pseudomonas mosselii,
+5001,PROTEUS MIRABILIS,Proteus mirabilis,PROTEUS_MIRABILIS,Proteus mirabilis,
+2030,Proteus mirabilis BLEE,Proteus mirabilis,PROTEUS_MIRABILIS,Proteus mirabilis,BLEE removed from taxonomic label only; no resistance inferred or modified.
+5002,PROTEUS VULGARIS,Proteus vulgaris,PROTEUS_VULGARIS,Proteus vulgaris,
+PG0AA6,PLURALIBACTER GERGOVIAE,Pluralibacter gergoviae,PLURALIBACTER_GERGOVIAE,Pluralibacter gergoviae,
+mormor,MORGANELLA MORGANII,Morganella morganii,MORGANELLA_MORGANII,Morganella morganii,
+3005,RAOULTELLA ORNITHINOLYTICA,Raoultella ornithinolytica,RAOULTELLA_ORNITHINOLYTICA,Raoultella ornithinolytica,
+RP05FE,RAOULTELLA PLANTICOLA,Raoultella planticola,RAOULTELLA_PLANTICOLA,Raoultella planticola,
+13000,HAFNIA ALVEI,Hafnia alvei,HAFNIA_ALVEI,Hafnia alvei,
+6002,PROVIDENCIA STUARTII,Providencia stuartii,PROVIDENCIA_STUARTII,Providencia stuartii,
