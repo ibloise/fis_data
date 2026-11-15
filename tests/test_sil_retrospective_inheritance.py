@@ -406,21 +406,21 @@ def test_duplicate_isolates_and_multiple_markers_use_positive_dominance(model):
 
 
 @pytest.mark.parametrize("markers", [[], [("OXA", "N")]])
-def test_matching_sample_without_positive_marker_stops_search(model, markers):
+def test_matching_sample_without_positive_marker_continues_search(model, markers):
     model.sample(100, "2026-01-31 00:00:00", [(1, "K", [])])
     model.sample(
         90, "2026-01-25 00:00:00", [(2, "K", markers), (3, "T", [("NDM", "P")])]
     )
     model.sample(80, "2026-01-20 00:00:00", [(4, "K", [("OXA", "P")])])
     profiles, global_profile, links = model.run()
-    assert profiles == {"K": "0000"}
-    assert global_profile == "0000"
-    assert set(links.values()) == {"NO_EVIDENCE"}
+    assert profiles == {"K": "1000"}
+    assert global_profile == "1000"
+    assert links["OXA48"] == "PRIOR_COMPATIBLE"
     assert (
         model.db.execute(
             "SELECT evidence_microb_sample_id FROM pcr_sil_retrospective_evidence"
         ).fetchone()[0]
-        == 90
+        == 80
     )
 
 
@@ -581,3 +581,113 @@ def test_export_result_sample_pseudonym_follows_evidence_sample(model, result_sa
     assert row["result_sample_pseudonym"] == expected
     assert "AS result_sample_pseudonym" in model.views["v_pcr_sil_result_link"]
     assert "summary.result_sample_pseudonym" in model.views["v_downstream_pcr_sil_target"]
+
+
+@pytest.mark.parametrize('marker,profile', [('OXA', '1000'), ('VIM', '0100'), ('KPC', '0010'), ('NDM', '0001')])
+def test_continue_multiple_uncharacterized_matches_to_positive(model, marker, profile):
+    model.params['max_days'] = 90
+    model.sample(100, '2026-04-01 00:00:00', [(1, 'K', [])])
+    model.sample(90, '2026-03-22 00:00:00', [])
+    model.sample(80, '2026-03-12 00:00:00', [(2, 'K', [])])
+    model.sample(70, '2026-02-25 00:00:00', [(3, 'K', [(marker, 'N')])])
+    model.sample(60, '2026-02-10 00:00:00', [(4, 'K', [(marker, 'P')])])
+    assert model.run()[:2] == ({'K': profile}, profile)
+    evidence = model.db.execute('SELECT * FROM pcr_sil_retrospective_evidence').fetchone()
+    assert evidence['evidence_microb_sample_id'] == 60
+    assert evidence['negative_count'] == 1
+    assert evidence['evidence_status'] == 'ACCEPTED'
+    details = json.loads(evidence['details_json'])
+    assert details['examined_count'] == 4
+    assert details['discarded_uncharacterized_count'] == 2
+
+
+@pytest.mark.parametrize('barrier,reason', [('BLE', 'BLEE'), ('NEG', 'THREE_NEGATIVES'), ('OTHER', 'OTHER_ORGANISM')])
+def test_first_stop_prevents_every_older_characterization(model, barrier, reason):
+    model.sample(100, '2026-01-31 00:00:00', [(1, 'K', [])])
+    model.sample(95, '2026-01-29 00:00:00', [])
+    model.sample(94, '2026-01-28 00:00:00', [(2, 'K', [])])
+    model.sample(93, '2026-01-27 00:00:00', [])
+    organisms = {'BLE': [(3, 'K', [('BLE', 'P')])], 'NEG': [], 'OTHER': [(3, 'E', [])]}[barrier]
+    model.sample(90, '2026-01-25 00:00:00', organisms)
+    model.sample(80, '2026-01-20 00:00:00', [(4, 'K', [('KPC', 'P')])])
+    profiles, global_profile, links = model.run()
+    assert profiles == {'K': '0000'}
+    assert global_profile is None
+    assert set(links.values()) == {'NO_EVIDENCE'}
+    evidence = model.db.execute('SELECT * FROM pcr_sil_retrospective_evidence').fetchone()
+    assert evidence['evidence_microb_sample_id'] == 90
+    assert evidence['evidence_status'] == 'NO_EVIDENCE'
+    assert evidence['reason'] == reason
+    assert not model.db.execute('SELECT * FROM pcr_sil_link_candidate').fetchall()
+
+
+@pytest.mark.parametrize('negatives', [0, 1, 2, 3])
+def test_exact_negative_limit(model, negatives):
+    model.sample(100, '2026-01-31 00:00:00', [(1, 'K', [])])
+    for index in range(negatives):
+        model.sample(95-index, f'2026-01-{29-index:02} 00:00:00', [])
+    model.sample(80, '2026-01-20 00:00:00', [(2, 'K', [('KPC', 'P')])])
+    _, profile, _ = model.run()
+    assert profile == ('0010' if negatives < 3 else None)
+    evidence = model.db.execute('SELECT * FROM pcr_sil_retrospective_evidence').fetchone()
+    assert evidence['negative_count'] == negatives
+    assert evidence['evidence_microb_sample_id'] == (80 if negatives < 3 else 93)
+
+
+def test_blee_with_carbapenemase_recovers_only_carbapenemase(model):
+    model.sample(100, '2026-01-31 00:00:00', [(1, 'K', [])])
+    model.sample(90, '2026-01-25 00:00:00', [(2, 'K', [('BLE', 'P'), ('VIM', 'P')])])
+    assert model.run()[:2] == ({'K': '0100'}, '0100')
+    assert {r[0] for r in model.db.execute('SELECT marker_code FROM pcr_sil_link_candidate')} == {'VIM'}
+
+
+def test_nonprocessed_samples_do_not_increment_or_stop(model):
+    model.sample(100, '2026-01-31 00:00:00', [(1, 'K', [])])
+    for sample_id, day in [(95, 29), (94, 28), (93, 27), (92, 26)]:
+        model.sample(sample_id, f'2026-01-{day} 00:00:00', [])
+        model.db.execute("UPDATE microb_analysis_result SET result_code='NPR' WHERE analysis_result_id=?", (sample_id,))
+    model.sample(80, '2026-01-20 00:00:00', [(2, 'K', [('NDM', 'P')])])
+    assert model.run()[:2] == ({'K': '0001'}, '0001')
+    assert model.db.execute('SELECT negative_count FROM pcr_sil_retrospective_evidence').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('days,accepted', [(90, True), (91, False)])
+def test_ninety_day_window_and_audit(model, days, accepted):
+    from datetime import datetime, timedelta
+
+    model.params['max_days'] = 90
+    current = datetime(2026, 4, 1)
+    model.sample(100, str(current), [(1, 'K', [])])
+    model.sample(90, str(current-timedelta(days=days)), [(2, 'K', [('OXA', 'P')])])
+    assert model.run()[1] == ('1000' if accepted else None)
+    evidence = model.db.execute('SELECT * FROM pcr_sil_retrospective_evidence').fetchone()
+    assert evidence['reason'] == ('CARBAPENEMASE' if accepted else 'WINDOW_EXCEEDED')
+
+
+def test_polymicrobial_blee_stop_does_not_combine_independent_history(model):
+    model.sample(100, '2026-01-31 00:00:00', [(1, 'K', []), (2, 'E', [])])
+    model.sample(90, '2026-01-25 00:00:00', [(3, 'K', [('BLE', 'P')]), (4, 'E', [])])
+    model.sample(80, '2026-01-20 00:00:00', [(5, 'E', [('KPC', 'P')])])
+    assert model.run()[:2] == ({'K': '0000', 'E': '0000'}, None)
+    assert model.db.execute('SELECT evidence_microb_sample_id FROM pcr_sil_retrospective_evidence').fetchone()[0] == 90
+
+
+def test_no_history_has_no_selected_sample_or_positive_attribution(model):
+    model.sample(100, '2026-01-31 00:00:00', [(1, 'K', [])])
+    assert model.run()[:2] == ({'K': '0000'}, None)
+    evidence = model.db.execute('SELECT * FROM pcr_sil_retrospective_evidence').fetchone()
+    assert evidence['evidence_microb_sample_id'] is None
+    assert evidence['reason'] == 'NO_CHARACTERIZED_HISTORY'
+    assert json.loads(evidence['details_json'])['search_started']
+
+
+@pytest.mark.parametrize('marker', ['BLE', 'OXA', 'KPC', 'NDM', 'VIM'])
+def test_direct_characterization_audits_skipped_search(model, marker):
+    model.sample(100, '2026-01-31 00:00:00', [(1, 'K', [(marker, 'P')]), (2, 'E', [])])
+    model.sample(90, '2026-01-25 00:00:00', [(3, 'E', [('NDM', 'P')])])
+    model.run()
+    evidence = model.db.execute('SELECT * FROM pcr_sil_retrospective_evidence').fetchone()
+    assert evidence['evidence_microb_sample_id'] is None
+    assert evidence['reason'] == 'DIRECT_CHARACTERIZATION'
+    assert not json.loads(evidence['details_json'])['search_started']
+    assert not model.db.execute('SELECT * FROM pcr_sil_link_candidate').fetchall()

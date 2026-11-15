@@ -178,7 +178,7 @@ def test_sil_queries_apply_the_irrelevant_organism_policy() -> None:
         connection.executions[0][0]
     )
     assert "PARTITION BY pcr_sample_id" in connection.executions[1][0]
-    assert "stops_after_first_match" in connection.executions[1][0]
+    assert "stop_reason" in connection.executions[1][0]
     assert "'DIRECT', 'ACCEPTED'" not in connection.executions[3][0]
     assert "NULL," in connection.executions[4][0]
     assert all("{relevant_" not in statement for statement, _ in connection.executions)

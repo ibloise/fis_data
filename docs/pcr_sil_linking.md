@@ -79,46 +79,42 @@ PCR directa.
 
 ## Búsqueda retrospectiva
 
-Se activa solo cuando la muestra SIL actual es `CULTURE_POSITIVE` y tiene al
-menos un aislado relevante sin caracterizar. Se conservan los identificadores
-de todos los aislados relevantes originales y sus códigos de organismo,
-incluidos los caracterizados. La decisión es por cultivo: se selecciona como
-máximo una muestra previa buscando cualquiera de esos códigos. La búsqueda
-se limita a muestras anteriores que
-cumplan todas estas condiciones:
-
-- Pertenecen al mismo paciente.
-- Son anteriores por fecha clínica (`received_at`, con `entered_at` como
-  respaldo si fuera necesario).
-- Son tipo de muestra `068`.
-- Tienen análisis `PMDR` de clase `BACTERIOLOGICAL`.
-- Contienen al menos uno de los `microorganism_code` actuales exactos. No se
-  aplican equivalencias taxonómicas ni comparaciones por nombre libre.
+La política `pcr-sil-linking-v5` inicia la búsqueda solo en cultivos positivos
+sin **ningún** aislado relevante con BLE/OXA/KPC/NDM/VIM e interpretación `P`.
+Una sola caracterización directa bloquea toda búsqueda, también en cultivos
+polimicrobianos. Se mantienen los códigos SIL originales sin equivalencias.
+Los antecedentes deben ser del mismo paciente, anteriores por `received_at`
+(o `entered_at`), de tipo `068` y análisis `PMDR` bacteriológico.
 
 Los parámetros serán versionados y configurables:
 
 | Parámetro | Valor por defecto | Efecto |
 |---|---:|---|
 | `previous_sample_max_days` | 90 | Distancia máxima entre la muestra actual y la previa. |
-| `previous_sample_max_negatives` | 3 | Máximo de cultivos negativos intermedios que se pueden atravesar. |
+| `previous_sample_max_negatives` | 3 | Número de negativos acumulados que detiene la búsqueda (se atraviesan como máximo dos). |
 
-Las muestras previas `CULTURE_NEGATIVE` incrementan el contador. Las
-`CULTURE_NOT_PROCESSED` no se convierten en positivas ni aportan evidencia; se
-mantiene su trazabilidad y la búsqueda puede continuar. La primera muestra
-previa compatible que contiene cualquiera de los organismos actuales detiene
-la iteración de todos ellos; no se buscan muestras distintas para *E. coli* y
-*Klebsiella*. Si se supera el máximo de negativos, se excede la ventana
-temporal, aparece un cultivo positivo sin ningún organismo actual o no hay
-muestra previa, la búsqueda termina sin herencia.
+Se recorren por fecha descendente (desempate por identificador descendente).
+La primera condición de parada decide el resultado de toda la muestra:
 
-La política `pcr-sil-linking-v4` hereda los marcadores OXA/KPC/NDM/VIM
-por coincidencia exacta de código entre los aislados originales y los de la
-única muestra previa seleccionada. Se evalúan todos los organismos originales:
-si están presentes en la muestra previa, sus marcadores positivos se agregan
-mediante OR; si están ausentes o no tienen marcadores positivos, su perfil
-heredado es `0000`. No se continúa buscando otra muestra para completarlos.
-`matched_microorganism_code` conserva una coincidencia representativa de la
-selección; no limita la herencia a ese único código.
+- Fecha a más de 90 días: `WINDOW_EXCEEDED`, sin herencia; exactamente 90 se admite.
+- Tercer negativo acumulado: `THREE_NEGATIVES`, sin herencia. El límite es
+  `negative_count >= max_negatives`, no se atraviesa el tercer negativo.
+- Positivo sin ningún código actual: `OTHER_ORGANISM`, sin herencia.
+- Coincidencia exacta con carbapenemasa `P`: `CARBAPENEMASE`, con herencia.
+- Coincidencia exacta con BLE `P` solamente: `BLEE`, sin herencia.
+
+Una coincidencia sin caracterización positiva continúa, incluso si otra
+especie del antecedente tiene carbapenemasas. Los no procesados no cuentan
+como negativos ni detienen. BLE y carbapenemasa simultáneas permiten heredar
+solo carbapenemasas positivas de los códigos coincidentes.
+
+Se conserva **una única muestra histórica por cultivo**: la primera que
+cumple una parada. En cultivos polimicrobianos se heredan los marcadores
+positivos de todos los códigos actuales presentes en esa muestra; nunca los
+de especies presentes únicamente en el antecedente. BLE de un código actual
+detiene la búsqueda para todos, aunque otros sigan sin caracterización.
+No se combinan historias independientes. Una política por especie queda
+pendiente de decisión clínica explícita.
 
 El resultado global reconciliado y la conciliación PCR–SIL se calculan como
 OR de los marcadores heredados por los organismos originales. Los mecanismos
@@ -131,8 +127,8 @@ Si no procede la búsqueda o no se encuentra muestra compatible, se utiliza
 la evidencia directa actual por organismo y su OR para el global. Cuando sí
 se selecciona muestra previa, la herencia determina el perfil reconciliado;
 los campos `direct_organism_*` conservan las observaciones actuales sin
-sobrescribirlas. BLEE impide que un aislado active por sí solo la búsqueda,
-pero no aporta evidencia OXA/KPC/NDM/VIM.
+sobrescribirlas. BLEE directa bloquea toda búsqueda y BLEE histórica coincidente la detiene;
+ninguna aporta evidencia OXA/KPC/NDM/VIM.
 
 Los perfiles son indicadores binarios de detección: un cero también puede
 significar ausencia de evidencia positiva, no necesariamente una prueba
@@ -204,7 +200,7 @@ declara cuando hay evidencia SIL para el mismo marcador: una PCR positiva es
 `CONCORDANT` y una PCR negativa `DISCORDANT`; los demás casos son
 `NOT_ASSESSABLE`.
 
-### Política conservadora v4
+### Política conservadora y auditoría v5
 
 La búsqueda solo comienza si **todos** los aislados relevantes del cultivo
 carecen de BLE, OXA, KPC, NDM y VIM positivas. Una sola caracterización positiva
@@ -213,7 +209,28 @@ su unión global y la procedencia de la muestra actual. No hay imputación selec
 ni procedencias mixtas. Las vistas y los enlaces también rechazan antecedentes
 aceptados inconsistentes cuando existe caracterización directa (incluida BLE).
 `0000` expresa ausencia de evidencia positiva, no negatividad demostrada.
-La ventana, los negativos intermedios y la selección histórica no cambian.
+La versión v5 cambia la selección histórica y el límite de negativos.
+`evidence_status=ACCEPTED` exige carbapenemasa efectivamente recuperable.
+Las paradas sin mecanismo conservan `NO_EVIDENCE`, el identificador de la
+muestra que detuvo el recorrido, distancia, negativos y `reason`. El JSON
+incluye `stop_reason`, `examined_count` y `discarded_uncharacterized_count`
+(hasta la parada). El recorrido SQL
+puede evaluar filas anteriores para calcular ventanas, pero ninguna posterior
+a la primera parada puede seleccionarse. Ausencia de antecedentes queda como
+`NO_EVIDENCE` sin muestra histórica (`NO_CHARACTERIZED_HISTORY`); la
+caracterización directa se audita con `DIRECT_CHARACTERIZATION` y
+`search_started=false`. Las categorías actuales no aplicables quedan como
+`NOT_APPLICABLE`.
+
+Los antecedentes coincidentes sin caracterización se descartan durante el
+recorrido; no generan candidatos aceptados. `candidate_status=ACCEPTED`
+requiere un marcador de carbapenemasa `P`. No se añaden columnas ni estados
+incompatibles a las exportaciones. Al detenerse sin mecanismo, las vistas
+mantienen `result_itself=true` y `result_sample` actual: la muestra de parada
+solo figura en auditoría. `global_encoded` y `encoded_carba_org` pueden seguir
+siendo `0000`, que expresa ausencia de detección positiva, nunca un
+antibiograma negativo completo. Los enlaces quedan `NO_EVIDENCE` y la
+concordancia `NOT_ASSESSABLE` para mecanismos no documentados.
 
 Tras actualizar el código instalado, regenerar con `derive-pcr --rebuild` como
 se indica arriba y repetir `export-downstream` para cada formato afectado.
@@ -229,7 +246,14 @@ fis-data export-downstream --db-url '<URL_POSTGRESQL>' --format analytical-core-
 ```
 
 Conservar los límites de la derivación anterior si difieren de este ejemplo.
-La validación de los 89 registros requiere una nueva derivación clínica.
+Verificar que los parámetros de la nueva derivación registran
+`pcr-sil-linking-v5`; no comparar como equivalentes derivaciones v4 y v5.
+Guardar las exportaciones anteriores antes del rebuild, ejecutar
+`pseudonymize`, regenerar ambos formatos y repetir los análisis de concordancia.
+Contar elegibles, paradas por `reason`, evidencias `ACCEPTED` y búsquedas sin
+mecanismo; comparar con las 222 imputaciones y revisar la reclasificación de
+los 594 antecedentes previos sin mecanismo. Estas cifras no son objetivos.
+No ejecutar estos comandos sobre datos reales sin autorización.
 
 En las vistas downstream, `result_itself` es siempre booleano: `false` si
 se utiliza una muestra histórica aceptada y `true` si se utiliza la muestra
