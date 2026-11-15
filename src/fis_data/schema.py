@@ -1834,7 +1834,19 @@ def create_views(engine: Engine) -> None:
             SELECT sample.sample_key, summary.microorganism_code,
                    summary.oxa_detected, summary.kpc_detected,
                    summary.ndm_detected, summary.vim_detected,
-                   summary.marker_codes_json, summary.isolate_count
+                   summary.marker_codes_json, summary.isolate_count,
+                   (SELECT MAX(CASE WHEN evidence.interpretation_code='P' THEN 1
+                                    WHEN evidence.interpretation_code='N' THEN 0
+                               END)
+                    FROM pcr_sil_isolate_marker_summary AS direct_isolate
+                    JOIN microb_susceptibility_result AS evidence
+                      ON evidence.isolate_id=direct_isolate.isolate_id
+                     AND evidence.antibiotic_code='BLE'
+                    WHERE direct_isolate.derivation_id=summary.derivation_id
+                      AND direct_isolate.pcr_sample_id=summary.pcr_sample_id
+                      AND direct_isolate.microb_sample_id=summary.microb_sample_id
+                      AND direct_isolate.microorganism_code=summary.microorganism_code
+                   ) AS direct_organism_blee
             FROM pcr_sil_organism_marker_summary AS summary
             JOIN pcr_sample AS sample ON sample.pcr_sample_id=summary.pcr_sample_id
             WHERE summary.derivation_id=({current})
@@ -2168,11 +2180,15 @@ def create_views(engine: Engine) -> None:
                    COALESCE(organism.vim_detected, FALSE)::int AS direct_organism_vim,
                    COALESCE(organism.kpc_detected, FALSE)::int AS direct_organism_kpc,
                    COALESCE(organism.ndm_detected, FALSE)::int AS direct_organism_ndm,
-                   st_by_organism.st
+                   st_by_organism.st,
+                   direct_evidence.direct_organism_blee
             FROM v_downstream_sil_pcr_global AS summary_global
             JOIN pcr_sample AS pcr_sample ON pcr_sample.sample_key=summary_global.sample
             LEFT JOIN pcr_sil_organism_marker_summary AS organism
               ON organism.derivation_id=({current}) AND organism.pcr_sample_id=pcr_sample.pcr_sample_id
+            LEFT JOIN v_pcr_sil_organism_marker_summary AS direct_evidence
+              ON direct_evidence.sample_key=pcr_sample.sample_key
+             AND direct_evidence.microorganism_code=organism.microorganism_code
             LEFT JOIN resolved_organism
               ON resolved_organism.pcr_sample_id=organism.pcr_sample_id
              AND resolved_organism.current_microb_sample_id=organism.microb_sample_id
@@ -2234,7 +2250,8 @@ def create_views(engine: Engine) -> None:
                    organism.microorg_code, organism.microorg_name,
                    target.canonical_target, target.marker_name,
                    target.organism_result, target.direct_organism_result,
-                   organism.isolate_count, organism.st
+                   organism.isolate_count, organism.st,
+                   organism.direct_organism_blee
             FROM v_downstream_sil_pcr_organism AS organism
             CROSS JOIN LATERAL (VALUES
                 ('OXA48', 'OXA-48', organism.organism_oxa48, organism.direct_organism_oxa48),
@@ -2250,7 +2267,7 @@ def create_views(engine: Engine) -> None:
                    microorg_name, encoded_carba_org AS reconciled_profile,
                    (direct_organism_oxa48::text || direct_organism_vim::text ||
                     direct_organism_kpc::text || direct_organism_ndm::text) AS direct_profile,
-                   isolate_count, st
+                   isolate_count, st, direct_organism_blee
             FROM v_downstream_sil_pcr_organism
             WHERE microorg_code IS NOT NULL
         """,

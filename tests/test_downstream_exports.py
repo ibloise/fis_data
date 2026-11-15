@@ -62,6 +62,59 @@ def test_sil_organism_view_keeps_samples_without_an_organism_summary() -> None:
     outer_select = statement.split("SELECT summary_global.*", 1)[1]
     assert "WHERE organism.derivation_id" not in outer_select
     assert "COALESCE(organism.oxa_detected, FALSE)::int" in statement
+    assert "direct_evidence.direct_organism_blee" in statement
+
+    # Execute the direct evidence view against synthetic SQLite records. No
+    # deployed database or retrospective evidence participates in this query.
+    evidence_view = next(
+        sql for sql in connection.statements
+        if sql.startswith("CREATE VIEW v_pcr_sil_organism_marker_summary")
+    )
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        for ddl in (
+            "CREATE TABLE pcr_derivation_run (derivation_id, status, is_current)",
+            "CREATE TABLE pcr_sample (pcr_sample_id, sample_key)",
+            "CREATE TABLE pcr_sil_organism_marker_summary (derivation_id, "
+            "pcr_sample_id, microb_sample_id, microorganism_code, oxa_detected, "
+            "kpc_detected, ndm_detected, vim_detected, marker_codes_json, isolate_count)",
+            "CREATE TABLE pcr_sil_isolate_marker_summary (derivation_id, "
+            "pcr_sample_id, microb_sample_id, microorganism_code, isolate_id)",
+            "CREATE TABLE microb_susceptibility_result (isolate_id, "
+            "antibiotic_code, interpretation_code)",
+        ):
+            conn.execute(text(ddl))
+        conn.execute(text("INSERT INTO pcr_derivation_run VALUES (1, 'SUCCESS', TRUE)"))
+        conn.execute(text("INSERT INTO pcr_sample VALUES (1, 'synthetic')"))
+        for code in ("positive", "negative", "absent", "unknown", "mixed"):
+            conn.execute(text(
+                "INSERT INTO pcr_sil_organism_marker_summary VALUES "
+                "(1, 1, 1, :code, 0, 0, 0, 0, '[]', 1)"
+            ), {"code": code})
+            conn.execute(text(
+                "INSERT INTO pcr_sil_isolate_marker_summary VALUES "
+                "(1, 1, 1, :code, :code)"
+            ), {"code": code})
+        conn.execute(text(
+            "INSERT INTO microb_susceptibility_result VALUES "
+            "('positive', 'BLE', 'P'), ('negative', 'BLE', 'N'), "
+            "('unknown', 'BLE', 'X'), ('mixed', 'BLE', 'P'), "
+            "('mixed', 'BLE', 'N'), ('absent', 'KPC', 'P'), "
+            "('prior', 'BLE', 'P'), ('other', 'BLE', 'P')"
+        ))
+        conn.execute(text(
+            "INSERT INTO pcr_sil_isolate_marker_summary VALUES "
+            "(1, 1, 2, 'absent', 'prior'), (2, 1, 1, 'absent', 'other')"
+        ))
+        conn.execute(text(evidence_view))
+        observed = dict(conn.execute(text(
+            "SELECT microorganism_code, direct_organism_blee "
+            "FROM v_pcr_sil_organism_marker_summary"
+        )).all())
+    assert observed == {
+        "positive": 1, "negative": 0, "absent": None,
+        "unknown": None, "mixed": 1,
+    }
 
 
 def test_sil_pcr_global_exposes_canonical_fis_markers() -> None:
@@ -146,6 +199,12 @@ def test_paper_views_use_pseudonyms_and_microorganism_level_evidence() -> None:
         assert "sample.sample_number" not in statement
     assert "organism.organism_oxa48" in organism
     assert "organism.direct_organism_oxa48" in organism
+    assert "organism.direct_organism_blee" in organism
+    profile = next(
+        sql for sql in connection.statements
+        if sql.startswith("CREATE VIEW v_downstream_sil_organism_profile")
+    )
+    assert "direct_organism_blee" in profile
     assert "CROSS JOIN LATERAL (VALUES" in target
     assert "summary.specific_status" in target
     assert "summary.result_itself" in target

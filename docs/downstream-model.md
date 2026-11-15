@@ -22,6 +22,16 @@ del repositorio. No describe el contenido de ninguna base desplegada.
    longitudinales desde esa derivación PCR vigente.
 6. Exportar `paper-analysis`.
 
+Las hojas `SIL PCR organisms`, `Culture organisms support`,
+`SIL organism targets` y `SIL organism profiles` incluyen la columna
+`direct_organism_blee`: `1` si algún aislado actual del microorganismo tiene
+`BLE/P`, `0` si existe `BLE/N` y ninguna positiva, y celda vacía si no hay
+interpretación explícita `P` o `N`. Solo se consideran los aislados del cultivo
+actual incluidos en la derivación vigente; no se incorpora evidencia
+retrospectiva. La agregación es por presencia: si hay resultados positivos y
+negativos, prevalece el positivo. Los perfiles codificados de carbapenemasas
+conservan sus cuatro posiciones.
+
 Las operaciones que reciben `--db-url` aceptan el URL SQLAlchemy de PostgreSQL;
 si se omite, usan la configuración `FIS_DATA_DB_*`. Los ejemplos completos de
 conexión y preparación están en el [README](../README.md).

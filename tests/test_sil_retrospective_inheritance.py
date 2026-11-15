@@ -268,6 +268,7 @@ def model():
              AND resolved_organism.microorganism_code=organism.microorganism_code
             CROSS JOIN (SELECT 'Synthetic organism' AS description) AS microorganism
             CROSS JOIN (SELECT NULL AS st) AS st_by_organism
+            CROSS JOIN (SELECT NULL AS direct_organism_blee) AS direct_evidence
         """
             )
         )
